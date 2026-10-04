@@ -21,7 +21,9 @@ export const meta = {
 // back as an error, never as proven; both of its checks run on the module whatever the rest of the
 // package looks like; `--report-all` gives every condition's verdict and fails a condition whose
 // preconditions CrossHair could not meet; and a module in which the gate checked nothing is not
-// proven either.
+// proven either. A function listed under [tool.beethoven-qa.unproven] passes the gate without
+// being checked as a target, so the result, the log and the review name each such function with
+// its reason: the reviewer must see which part of a proven module was never proven.
 //
 // args: { module: 'src/<package>/<name>.py', maxRounds?: number }
 //       module is required: without it nothing runs and the result is { error }.
@@ -30,7 +32,7 @@ export const meta = {
 
 const PROOF = {
   type: 'object',
-  required: ['dotted', 'exit_code', 'refused', 'targets', 'counterexamples', 'verdicts', 'gate_output'],
+  required: ['dotted', 'exit_code', 'refused', 'targets', 'counterexamples', 'set_aside', 'verdicts', 'gate_output'],
   properties: {
     dotted: { type: 'string', description: 'the dotted module name passed to --module, empty if none could be derived' },
     exit_code: { type: 'integer', description: 'the exit status of the gate command; -1 if it was not run' },
@@ -48,6 +50,18 @@ const PROOF = {
           function: { type: 'string', description: 'qualified name of the function' },
           input: { type: 'string', description: "CrossHair's counterexample input, verbatim, or none" },
           violated: { type: 'string', description: 'the postcondition or invariant it violates, verbatim; or no contracts; or Unable to meet precondition at file:line' },
+        },
+      },
+    },
+    set_aside: {
+      type: 'array',
+      description: 'one entry per line "gate: not proven, contracts checked at run time only: <name>: <reason>": the functions listed under [tool.beethoven-qa.unproven], which the gate did not check as targets',
+      items: {
+        type: 'object',
+        required: ['name', 'reason'],
+        properties: {
+          name: { type: 'string', description: 'the qualified name, as the line prints it' },
+          reason: { type: 'string', description: 'the reason, verbatim from the line' },
         },
       },
     },
@@ -181,9 +195,17 @@ function proveCommand(module, dotted) {
     'the first check lists, with input "none" and violated "no contracts"; and each condition reported ' +
     '"Unable to meet precondition.", with input "none" and violated "Unable to meet precondition at ' +
     '<file:line>". List every condition\'s verdict, and how many contracted functions and classes the gate ' +
-    'says it checked. Change no file, and never run `pixi lock`, `pixi update`, `pixi add` or a plain ' +
-    '`pixi install`.'
+    'says it checked. List under set_aside each line "gate: not proven, contracts checked at run time ' +
+    'only: <name>: <reason>", with its name and reason: those functions are listed under ' +
+    '[tool.beethoven-qa.unproven] and the gate did not check them as targets. Change no file, and never run `pixi ' +
+    'lock`, `pixi update`, `pixi add` or a plain `pixi install`.'
   )
+}
+
+// What the gate printed as set aside, as a list a person can read; the gate passes with these
+// unproven, so a proof is never reported without them.
+function setAside(proof) {
+  return (proof.set_aside || []).map((s) => ({ name: String(s.name), reason: String(s.reason) }))
 }
 
 const problem = moduleProblem(args)
@@ -234,7 +256,11 @@ for (let round = 1; round <= maxRounds; round++) {
     proven = true
     const verdicts = proof.verdicts || []
     const confirmed = verdicts.filter((v) => /confirmed over all paths/i.test(v.verdict)).length
-    log(`round ${round}: ${module} has no counterexample within its declared bound; ${confirmed} of ${verdicts.length} condition(s) confirmed over all paths`)
+    const aside = setAside(proof)
+    log(
+      `round ${round}: ${module} has no counterexample within its declared bound; ${confirmed} of ${verdicts.length} condition(s) confirmed over all paths` +
+        (aside.length ? `; ${aside.length} function(s) set aside under [tool.beethoven-qa.unproven] and not proven: ${aside.map((s) => `${s.name} (${s.reason})`).join('; ')}` : ''),
+    )
     break
   }
   if (proof.counterexamples.length === 0) {
@@ -305,21 +331,28 @@ if (!proven) {
     rounds,
     stopped,
     counterexamples: lastProof ? lastProof.counterexamples : [],
+    set_aside: lastProof ? setAside(lastProof) : [],
     gate_output: lastProof ? lastProof.gate_output : null,
     repairs,
   }
 }
 
 // Humans review the contracts, not raw lines: one reading of the module's public functions, in words.
+// A function the gate set aside has no verdict at all, and the reviewer must not be handed "no
+// counterexample" for it.
 phase('Review')
+const aside = setAside(lastProof)
 const review = await agent(
   `Read ${module}. For every public function, write its @require preconditions and @ensure ` +
     `postconditions (and class invariants) in plain words a reviewer can check against the intent, one ` +
     `line each, with each condition's verdict from the gate below ("confirmed over all paths", or "no ` +
     `counterexample within N s", N the declared bound), and name the declared symbolic bound ` +
     `(per_condition_timeout under [tool.beethoven-qa] in pyproject.toml). Change no file.\n` +
-    `The gate's verdicts:\n${JSON.stringify(lastProof.verdicts || [], null, 1)}`,
+    `The gate's verdicts:\n${JSON.stringify(lastProof.verdicts || [], null, 1)}\n` +
+    `Functions set aside under [tool.beethoven-qa.unproven], which the gate did not check as targets: mark each of ` +
+    `their conditions "not proven: contracts checked at run time only (<reason>)", never "no ` +
+    `counterexample":\n${JSON.stringify(aside, null, 1)}`,
   { label: `contracts of ${module}`, phase: 'Review', schema: REVIEW },
 )
 
-return { module, proven: true, rounds, verdicts: lastProof.verdicts || [], contracts: review ? review.functions : null, repairs }
+return { module, proven: true, rounds, verdicts: lastProof.verdicts || [], set_aside: aside, contracts: review ? review.functions : null, repairs }

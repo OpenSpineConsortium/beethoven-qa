@@ -27,7 +27,15 @@ export const meta = {
 // the gate instead of passing in silence. Every pixi command is `--locked`, so no step re-solves the
 // lock. What the Pin phase must leave alone is checked against the module's sha256 recorded at the
 // start of the run, not against git, which knows nothing of an untracked module and counts the
-// person's own uncommitted edits as the run's.
+// person's own uncommitted edits as the run's; and the pinned tests, once they pass, are held to
+// their own sha256 in every proving round, so a change to a pinned assertion that no repair named
+// is caught instead of proven against. No digest is ever handed to the agent it checks: an agent
+// told the value it must match could echo it instead of running sha256sum.
+//
+// A module listed in exempt stops the run after the Read phase: `gate --module` refuses an exempt
+// module, so nothing could be proven, and nothing is changed. A gate that refuses the module in the
+// Prove phase ends the run there, without the skeptics or the reporter, who would read as proven
+// contracts the gate never checked.
 //
 // Two kinds of change are a person's to choose, so the workflow records them as decisions and makes
 // neither. A public module-level function that does I/O cannot carry contracts (CrossHair would run
@@ -79,7 +87,7 @@ const MAP = {
 
 const PIN = {
   type: 'object',
-  required: ['test_file', 'tests', 'passed', 'output', 'module_sha256_after'],
+  required: ['test_file', 'tests', 'passed', 'output', 'module_sha256_after', 'pinned_sha256'],
   properties: {
     test_file: { type: 'string', description: 'the file the pinned tests are in' },
     tests: {
@@ -98,6 +106,7 @@ const PIN = {
     passed: { type: 'boolean', description: 'true only if every pinned test passed on the unchanged module' },
     output: { type: 'string', description: 'the last lines of the test run, verbatim' },
     module_sha256_after: { type: 'string', description: 'the 64 hex digits sha256sum prints for the module after the pinned tests pass' },
+    pinned_sha256: { type: 'string', description: 'the 64 hex digits sha256sum prints for test_file after the pinned tests pass' },
     suspected_bugs: {
       type: 'array',
       items: {
@@ -167,7 +176,7 @@ const CONTRACT = {
 
 const PROOF = {
   type: 'object',
-  required: ['exit_code', 'refused', 'targets', 'counterexamples', 'uncontracted', 'verdicts', 'gate_output', 'pinned_passed'],
+  required: ['exit_code', 'refused', 'targets', 'counterexamples', 'uncontracted', 'problems', 'set_aside', 'verdicts', 'gate_output', 'pinned_passed', 'pinned_sha256'],
   properties: {
     exit_code: { type: 'integer', description: 'the exit status of the gate command; -1 if it was not run' },
     refused: { type: 'boolean', description: 'true if the gate checked nothing because it refused the module or an option' },
@@ -185,6 +194,23 @@ const PROOF = {
       },
     },
     uncontracted: { ...LIST, description: "functions of the module the gate's first check reported without contracts" },
+    problems: {
+      ...LIST,
+      description:
+        'every other "gate:" line that fails the gate, verbatim: a public coroutine, a pydantic model with contracts, a "# crosshair:" directive, an unproven entry the gate calls stale or misnamed, a target CrossHair found nothing to check in, a precondition no input can meet; not a counterexample, not a function without contracts, not a set-aside line, not the summary lines',
+    },
+    set_aside: {
+      type: 'array',
+      description: 'one entry per line "gate: not proven, contracts checked at run time only: <name>: <reason>": the functions listed under [tool.beethoven-qa.unproven], which the gate did not check as targets',
+      items: {
+        type: 'object',
+        required: ['name', 'reason'],
+        properties: {
+          name: { type: 'string', description: 'the qualified name, as the line prints it' },
+          reason: { type: 'string', description: 'the reason, verbatim from the line' },
+        },
+      },
+    },
     verdicts: {
       type: 'array',
       items: {
@@ -199,6 +225,7 @@ const PROOF = {
     gate_output: { type: 'string', description: 'the decisive lines of the gate output, verbatim' },
     pinned_passed: { type: 'boolean', description: 'every test in the pinned file passed' },
     pinned_output: { type: 'string', description: 'the failing pinned tests and their decisive lines, verbatim, if any failed' },
+    pinned_sha256: { type: 'string', description: 'the 64 hex digits sha256sum prints for the pinned test file now' },
   },
 }
 
@@ -361,12 +388,26 @@ function dottedNames(module, dotted) {
 // the set, not of the listing.
 function proofKey(proof) {
   const ces = proof.counterexamples.map((c) => [c.function, c.input, c.violated]).sort()
-  return JSON.stringify([ces, [...proof.uncontracted].sort(), proof.pinned_passed])
+  return JSON.stringify([ces, [...proof.uncontracted].sort(), [...(proof.problems || [])].sort(), proof.pinned_passed])
 }
 
-// Two skeptics quote the same contract with different spacing; the key ignores that.
+// Two skeptics quote the same contract with different spacing; the key ignores that. The separator
+// is a unit separator written as a hex escape: tools/check_workflows.mjs refuses every unicode
+// escape, since one could spell a name it reads as written.
 function claimKey(c) {
-  return `${c.function}\u0000${c.contract.replace(/\s+/g, ' ').trim()}`
+  return `${c.function}\x1f${c.contract.replace(/\s+/g, ' ').trim()}`
+}
+
+// What the gate printed as set aside, as a list a person can read; the gate passes with these
+// unproven, so a proof is never reported without them.
+function setAside(proof) {
+  return (proof.set_aside || []).map((s) => ({ name: String(s.name), reason: String(s.reason) }))
+}
+
+// A repair may change the pinned file only through a correction it names: a finding whose test is
+// in that file.
+function namesPinnedAssertion(repair, pinFile) {
+  return (repair.findings || []).some((f) => String(f.test || '').split('::')[0] === pinFile)
 }
 
 const problem = moduleProblem(args)
@@ -428,14 +469,18 @@ if (map.module_dirty) {
   log(`${module} had uncommitted changes (or was untracked) before this run; they are the person's, not this run's, and they stay mixed with what this run changes`)
 }
 if (map.exempt) {
-  log(`${module} is listed in exempt: the gate's first check skips it; whether it stays there is a person's call, not this workflow's`)
+  log(`${module} is listed in exempt under [tool.beethoven-qa], and gate --module refuses an exempt module, so nothing could be proven; stopping before anything changes (whether it stays exempt is a person's call, not this workflow's)`)
+  return outcome({ error: `${module} is exempt`, stopped: 'the module is exempt' })
 }
 const dotted = map.dotted
 if (!dottedNames(module, dotted)) {
   log(`the map agent named ${JSON.stringify(dotted)} as the dotted name of ${module}, which it is not; stopping before anything changes`)
   return outcome({ error: `no dotted name for ${module}`, stopped: 'the Read phase gave no dotted name for the module' })
 }
-const mapText = JSON.stringify(map, null, 1)
+// The map the later agents read, without the digest the Pin phase is held to.
+const shown = { ...map }
+delete shown.module_sha256
+const mapText = JSON.stringify(shown, null, 1)
 
 // --- Pin -------------------------------------------------------------------------------------
 phase('Pin')
@@ -453,7 +498,8 @@ const pin = await agent(
     "Pin I/O with pytest's tmp_path or with values passed in, never by touching anything outside the " +
     "test's own temporary directory. The tests run under typeguard's import hook (conftest.py). Run them " +
     'with `pixi run --locked pytest -q <the file>` and make them pass on the unchanged module by fixing the ' +
-    `tests, never the module; then run \`sha256sum ${module}\` and report the 64 hex digits. ` +
+    `tests, never the module; then run \`sha256sum ${module}\` and \`sha256sum <the file>\` and report the ` +
+    '64 hex digits of each. ' +
     'Where a behaviour looks like a bug, pin it as it is and list it under suspected_bugs: it is decided ' +
     'later, with a test. Never run `pixi lock`, `pixi update`, `pixi add` or a plain `pixi install`. Do not commit.',
   { label: `pin ${module}`, phase: 'Pin', schema: PIN },
@@ -474,7 +520,14 @@ if (!pin.passed || pin.tests.length === 0) {
   log(`the pinned tests do not pass on the unchanged module (or none were written); stopping:\n${pin.output}`)
   return outcome({ stopped: 'no passing pin of the current behaviour', pinned: pin.test_file })
 }
-log(`pinned ${pin.tests.length} behaviour(s) in ${pin.test_file}; ${(pin.suspected_bugs || []).length} suspected bug(s) pinned as they are`)
+// The pinned file as it passed; every proving round is held to it, and only a repair that names
+// the pinned assertion it corrected may move it.
+let pinnedSha = digest(pin.pinned_sha256)
+if (!SHA256.test(pinnedSha)) {
+  log(`the pin agent reported no sha256 of ${pin.test_file} (${JSON.stringify(pin.pinned_sha256)}); stopping before anything in the module changes, since a later change to the pinned tests could not be told from the tests as they passed`)
+  return outcome({ stopped: 'no sha256 of the pinned tests after the Pin phase', pinned: pin.test_file })
+}
+log(`pinned ${pin.tests.length} behaviour(s) in ${pin.test_file} (sha256 ${pinnedSha}); ${(pin.suspected_bugs || []).length} suspected bug(s) pinned as they are`)
 
 // --- Contract --------------------------------------------------------------------------------
 phase('Contract')
@@ -524,6 +577,10 @@ let stopped = null
 let refusal = null
 let lastKey = null
 let lastProof = null
+let pinnedMayChange = false
+// Set when the run stops because the pinned file moved without a named correction: what its tests
+// passed then is not the pinned behaviour, so the last proof's pinned verdict is reported as none.
+let pinnedMoved = false
 const preconditions = []
 for (let round = 1; round <= maxRounds; round++) {
   phase('Prove')
@@ -540,11 +597,15 @@ for (let round = 1; round <= maxRounds; round++) {
       'gate_output. List every counterexample with the function, ' +
       'the input and the violated condition, verbatim; each condition reported "Unable to meet ' +
       'precondition.", with input "none" and violated "Unable to meet precondition at <file:line>"; every ' +
-      "function the first check reported without contracts; every condition's verdict; and how many " +
-      'contracted functions and classes the gate says it checked. Then run ' +
+      "function the first check reported without contracts; every condition's verdict; how many " +
+      'contracted functions and classes the gate says it checked; under problems, verbatim, every other ' +
+      '"gate:" line that fails the gate (a public coroutine, a pydantic model with contracts, a "# crosshair:" ' +
+      'directive, an unproven entry the gate calls stale or misnamed, a target CrossHair found nothing to ' +
+      'check in, a precondition no input can meet); and under set_aside each line "gate: not proven, ' +
+      'contracts checked at run time only: <name>: <reason>", with its name and reason. Then run ' +
       `\`pixi run --locked pytest -q ${pin.test_file}\` and report whether every pinned test passed, with ` +
-      'the failing ones verbatim. Change no file, and never run `pixi lock`, `pixi update`, `pixi add` or a ' +
-      'plain `pixi install`.',
+      `the failing ones verbatim, and run \`sha256sum ${pin.test_file}\` and report the 64 hex digits. ` +
+      'Change no file, and never run `pixi lock`, `pixi update`, `pixi add` or a plain `pixi install`.',
     { label: `prove ${module} round ${round}`, phase: 'Prove', schema: PROOF },
   )
   if (!proof) {
@@ -560,32 +621,61 @@ for (let round = 1; round <= maxRounds; round++) {
   }
   lastProof = proof
   const provenNow = isProven(proof)
+  const problems = proof.problems || []
   rounds.push({
     round,
     exit_code: proof.exit_code,
     targets: proof.targets,
     counterexamples: proof.counterexamples.length,
     uncontracted: proof.uncontracted.length,
+    problems: problems.length,
     pinned_passed: proof.pinned_passed,
   })
+  // The pinned file is read by an agent that was never told the digit string it is compared with.
+  const nowSha = digest(proof.pinned_sha256)
+  if (!SHA256.test(nowSha)) {
+    stopped = `the prove agent reported no sha256 of ${pin.test_file} (${JSON.stringify(proof.pinned_sha256)}), so whether it is as it passed in the Pin phase is not known; stopping for a person`
+    log(`round ${round}: ${stopped}`)
+    break
+  }
+  if (nowSha !== pinnedSha) {
+    if (!pinnedMayChange) {
+      const who =
+        round === 1
+          ? 'the Contract phase, which may not change it'
+          : `the repair in round ${round - 1}, which named no pinned assertion it corrected`
+      stopped = `${pin.test_file} is not as it passed in the Pin phase (sha256 ${pinnedSha} then, ${nowSha} now) after ${who}; what its tests pass now is not the pinned behaviour, so the change is left in the checkout for a person`
+      pinnedMoved = true
+      log(`round ${round}: ${stopped}`)
+      break
+    }
+    log(`round ${round}: ${pin.test_file} changed with the repair in round ${round - 1}, which named the pinned assertion it corrected; sha256 ${nowSha} now`)
+    pinnedSha = nowSha
+  }
+  pinnedMayChange = false
   if (provenNow && proof.pinned_passed) {
     finished = true
-    log(`round ${round}: ${module} has no counterexample within its declared bound, and its pinned behaviour holds`)
+    const aside = setAside(proof)
+    log(
+      `round ${round}: ${module} has no counterexample within its declared bound, and its pinned behaviour holds` +
+        (aside.length ? `; ${aside.length} function(s) set aside under [tool.beethoven-qa.unproven] and not proven: ${aside.map((s) => `${s.name} (${s.reason})`).join('; ')}` : ''),
+    )
     break
   }
   if (!proof.pinned_passed) log(`round ${round}: pinned tests fail, so behaviour changed since the Pin phase`)
   const open = proof.uncontracted.filter((name) => !awaiting.has(name) && !awaiting.has(name.split('.').pop()))
-  if (!provenNow && proof.counterexamples.length === 0 && proof.uncontracted.length === 0) {
+  if (!provenNow && proof.counterexamples.length === 0 && proof.uncontracted.length === 0 && problems.length === 0) {
     stopped =
       proof.targets <= 0
         ? `the gate checked no contracted function or class in ${module}, so nothing was proven`
-        : `the gate failed on ${module} but named no counterexample and no function without contracts; its output is returned for a person`
+        : `the gate failed on ${module} but named no counterexample, no function without contracts and no other problem; its output is returned for a person`
     log(`round ${round}: ${stopped}`)
     break
   }
-  if (proof.pinned_passed && proof.counterexamples.length === 0 && open.length === 0) {
+  if (proof.pinned_passed && proof.counterexamples.length === 0 && open.length === 0 && problems.length === 0) {
     // The gate's second check ran on this module whatever its first check found, so the contracts
-    // that are here were checked; only the person's decisions are left.
+    // that are here were checked; only the person's decisions are left. A problem the gate reports
+    // beside them (a coroutine, a directive, a stale entry) is not theirs, and goes to a repair.
     stopped =
       proof.targets > 0
         ? `CrossHair found no counterexample in the ${proof.targets} contracted function(s) and class(es) of ${module} ` +
@@ -597,7 +687,14 @@ for (let round = 1; round <= maxRounds; round++) {
   }
   const key = proofKey(proof)
   if (key === lastKey) {
-    stopped = 'the same counterexamples two rounds running'
+    // The key holds every finding of the gate and the pinned verdict; name what this round had.
+    const same = [
+      proof.counterexamples.length ? 'counterexamples' : '',
+      proof.uncontracted.length ? 'functions without contracts' : '',
+      problems.length ? 'gate problems' : '',
+      proof.pinned_passed ? '' : 'failing pinned tests',
+    ].filter(Boolean)
+    stopped = `the same ${same.length > 1 ? `${same.slice(0, -1).join(', ')} and ${same[same.length - 1]}` : same[0]} two rounds running`
     log(`round ${round}: ${stopped}; stopping`)
     break
   }
@@ -608,10 +705,15 @@ for (let round = 1; round <= maxRounds; round++) {
     `The module ${module} is not done yet.\n` +
       proof.counterexamples.map((c) => `- ${c.function}: input ${c.input} violates ${c.violated}`).join('\n') +
       (open.length ? `\nWithout contracts: ${open.join(', ')}` : '') +
+      (problems.length ? `\nThe gate also reports:\n${problems.map((p) => `- ${p}`).join('\n')}` : '') +
       (proof.pinned_passed ? '' : `\nPinned tests that fail now:\n${proof.pinned_output || '(no output reported)'}`) +
       `\n\nGate output:\n${proof.gate_output}\n\n${CONVENTIONS}\n\n${NEVER}\n\n` +
       'For each counterexample decide whether the code or the contract is wrong, and fix that one thing ' +
-      `minimally in ${module} or its tests. Before deciding, call the function with the input in a test and ` +
+      `minimally in ${module} or its tests. A line the gate reports beside the counterexamples (a public ` +
+      'coroutine, contracts on a pydantic model, a `# crosshair:` directive, a target CrossHair found nothing ' +
+      'to check in) is fixed in the module the way the line says; an entry under [tool.beethoven-qa.unproven] ' +
+      "the gate calls stale or misnamed is the person's to remove, so leave it and say so. " +
+      'Before deciding, call the function with the input in a test and ' +
       'watch it fail. A report that does not reproduce concretely is a fault of the tool: record the input, ' +
       'the line and the CrossHair version in your note, and never change the code, loosen a contract or lower ' +
       "the bound for it; only a precondition that states the callers' real domain may exclude its input. An " +
@@ -622,7 +724,8 @@ for (let round = 1; round <= maxRounds; round++) {
       'changed: restore it, unless that test pinned a real bug. If the code is wrong (a real bug), first ' +
       'write a test that fails on it, then fix the code, and record a finding with the input, what the code ' +
       `did, what it should do and the test; if a test in ${pin.test_file} pinned the wrong behaviour, change ` +
-      'that one assertion to the expected value, name it in the finding, and never delete a pinned test. Then ' +
+      `that one assertion to the expected value, name it as the finding's test (${pin.test_file}::<test>), and ` +
+      `never delete a pinned test; ${pin.test_file} changes in no other way. Then ` +
       `run \`pixi run --locked pytest -q ${pin.test_file}\` and the tests you touched.` +
       (awaiting.size ? ` Leave these public I/O functions alone, they wait on a person: ${[...awaiting].join(', ')}.` : '') +
       ' Do not commit. Report what changed and why, per counterexample, and every precondition you added or ' +
@@ -641,6 +744,7 @@ for (let round = 1; round <= maxRounds; round++) {
   if (added.length) {
     log(`round ${round}: ${added.length} precondition(s) added or strengthened; a person checks each against its callers: ${added.map((p) => `${p.function}: ${p.precondition}`).join('; ')}`)
   }
+  pinnedMayChange = namesPinnedAssertion(repair, pin.test_file)
   // Proving unchanged code again would only repeat this round.
   if (!repair.changed) {
     stopped = `the repair in round ${round} changed nothing`
@@ -651,9 +755,16 @@ if (!finished && !stopped) {
   stopped = `not done within ${maxRounds} round(s)`
   log(`${module}: ${stopped}`)
 }
+if (refusal) {
+  // The gate checked nothing, so there is no proof for the skeptics to weigh or the reporter to
+  // write up; what the Pin and Contract phases changed stays in the checkout.
+  log(`${module}: ${refusal}; the pinned tests and the contract change are left in the checkout, unproven, for a person`)
+  return outcome({ error: refusal, stopped, pinned: pin.test_file, decisions: contract.decisions, preconditions })
+}
 const proven = Boolean(lastProof && isProven(lastProof))
-const pinnedPassed = lastProof ? lastProof.pinned_passed : null
+const pinnedPassed = lastProof && !pinnedMoved ? lastProof.pinned_passed : null
 const verdicts = lastProof ? lastProof.verdicts || [] : []
+const aside = lastProof ? setAside(lastProof) : []
 
 // --- Vacuity ---------------------------------------------------------------------------------
 // A proof says the code keeps its contracts; it says nothing about whether the contracts are worth
@@ -712,9 +823,15 @@ const report = await agent(
     'N the declared bound; "proven" only for the first), and name the declared symbolic bound ' +
     '(per_condition_timeout under [tool.beethoven-qa] in pyproject.toml). Then a short summary for the person: ' +
     'what the module now promises, what was found, and what they still have to decide. No counterexample ' +
-    `from the gate on this module: ${proven}; pinned behaviour holds: ` +
-    `${pinnedPassed}${stopped ? `; stopped: ${stopped}` : ''}.\n` +
+    `from the gate on this module: ${proven}; ` +
+    (pinnedMoved
+      ? `pinned tests ${lastProof.pinned_passed ? 'passed' : 'failed'} on a pinned file that changed without a named correction`
+      : `pinned behaviour holds: ${pinnedPassed}`) +
+    `${stopped ? `; stopped: ${stopped}` : ''}.\n` +
     `Each condition's verdict:\n${JSON.stringify(verdicts, null, 1)}\n` +
+    'Functions set aside under [tool.beethoven-qa.unproven], which the gate did not check as targets: mark each of their ' +
+    'conditions "not proven: contracts checked at run time only (<reason>)", never "no counterexample":\n' +
+    `${JSON.stringify(aside, null, 1)}\n` +
     `Preconditions a repair added or strengthened (check each against its callers):\n${JSON.stringify(preconditions, null, 1)}\n` +
     `Bugs found and fixed with a test:\n${JSON.stringify(findings, null, 1)}\n` +
     `Contract weaknesses that counted:\n${JSON.stringify(counted, null, 1)}\n` +
@@ -728,7 +845,6 @@ log(
     (map.module_dirty ? `; ${module} already had uncommitted changes when this run started (sha256 ${startSha}), so look at its diff before committing it` : ''),
 )
 return outcome({
-  ...(refusal ? { error: refusal } : {}),
   proven,
   pinned_passed: pinnedPassed,
   stopped,
@@ -736,6 +852,7 @@ return outcome({
   decisions: contract.decisions,
   counterexamples: lastProof ? lastProof.counterexamples : [],
   verdicts,
+  set_aside: aside,
   preconditions,
   vacuity,
   contracts: report ? report.functions : null,
