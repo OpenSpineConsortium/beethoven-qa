@@ -1,0 +1,13 @@
+#!/bin/sh
+# The definition-of-done gate runs before every push, not only in CI: lint, typecheck, the tests
+# under typeguard, and the CrossHair/Z3 proof of every contract. A push with a red gate does not
+# leave the machine. --locked: the gate runs in the environment pixi.lock records, and a manifest
+# that drifted from its lock fails here instead of being re-solved, without a word, into a lock
+# nobody chose. Skip it only knowingly, with SKIP_GATE=1, and say so in the commit.
+if [ "${SKIP_GATE:-}" = 1 ]; then
+  echo "pre-push: gate skipped (SKIP_GATE=1)" >&2
+  exit 0
+fi
+cd "$(git rev-parse --show-toplevel)" || exit 1
+echo "pre-push: running the gate (pixi run --locked gate) before the push" >&2
+exec pixi run --locked gate

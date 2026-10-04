@@ -1,0 +1,69 @@
+name: ci
+# The definition of done for beethoven-qa itself, and for the plugin it ships. No job holds a secret
+# and none reaches the grid: GitHub's runners cannot (VPN and a one-time code stand between), and
+# tokens never enter a repository (CLAUDE.md). The two job names are the required checks in
+# .github/rulesets/main.json; renaming a job means changing that file in the same pull request.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # The pixi that produced the committed lock. Fetched from its release asset by name, not from an
+  # install script, so the run makes one fetch it can account for.
+  PIXI_VERSION: 0.81.0
+  # The Claude Code CLI the plugin is validated with; `claude plugin validate` needs no sign-in.
+  # Pinned so a green check means the same thing tomorrow; raise it on purpose, in its own commit.
+  CLAUDE_CODE_VERSION: 2.1.289
+
+jobs:
+  gate:
+    # The substrate reconstructs from the lock alone, then the four gates run inside it. The tests
+    # include the gate run against two throwaway packages and the pinned copy's round trip in
+    # throwaway git checkouts.
+    name: gate (lock → lint, typecheck, tests, CrossHair/Z3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: install pixi
+        run: |
+          curl -fsSL -o /usr/local/bin/pixi \
+            "https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl"
+          chmod 0755 /usr/local/bin/pixi
+          pixi --version
+      - name: reconstruct the environment from the lock
+        # --locked refuses to re-solve: a manifest that drifted from its lock fails here, on purpose.
+        run: pixi install --locked
+      - name: lint
+        run: pixi run --locked lint
+      - name: typecheck
+        run: pixi run --locked typecheck
+      - name: tests (typeguard enclave)
+        run: pixi run --locked test
+      - name: symbolic verification (CrossHair + Z3)
+        run: pixi run --locked symbolic
+      - name: shell syntax of the kit
+        run: bash -n .githooks/pre-push .claude/hooks/session-start.sh
+
+  plugin:
+    # The plugin and its marketplace validate the way Claude Code reads them, and every saved
+    # workflow script parses, so a session that installs the plugin never meets a broken one.
+    name: plugin (validate, workflow scripts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: install the Claude Code CLI
+        run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" && claude --version
+      - name: validate the marketplace and the plugin
+        # An empty home, so nothing of the runner's (and no credential, there is none) is read.
+        run: |
+          HOME="$(mktemp -d)" claude plugin validate .
+          HOME="$(mktemp -d)" claude plugin validate plugin
+      - name: the workflow scripts parse and avoid what breaks a resume
+        run: node tools/check_workflows.mjs

@@ -1,0 +1,26 @@
+# Pixi's solved environment: reconstructable from pixi.lock, never committed.
+.pixi/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Apptainer images are large and are rebuilt from their recipe; an image is never committed.
+*.sif
+
+# Secrets never enter the repository. The real values live in the environment.
+.env
+.env.*
+*.pem
+
+# Worktrees Claude Code creates for parallel sessions and isolated subagents.
+.claude/worktrees/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
