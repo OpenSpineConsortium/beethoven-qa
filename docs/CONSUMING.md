@@ -101,9 +101,11 @@ pixi run --locked --manifest-path ../beethoven-qa/pixi.toml python -m beethoven_
   files equal to that copy's, are rewritten even uncommitted, since nothing in them is lost: taking
   another tag before the first commit just works.
 - **It never deletes.** A file the old copy had and the new release does not is left in place and
-  listed with one line for the person to run, `rm -- <files> && git add -u -- vendor/beethoven-qa`,
-  which works whether or not the old copy was committed; `vendor-check` fails until it is gone, so
-  nothing leaves a repository without a reviewed commit.
+  listed with one line for the person to run,
+  `rm -- <files> && git rm -q --cached --ignore-unmatch -- <files>`, which works whether or not the
+  old copy was committed (an earlier `git add -u -- vendor/beethoven-qa` did not: git 2.55 on
+  GitHub's runners refuses it for a folder git does not track yet, where 2.43 accepted it);
+  `vendor-check` fails until it is gone, so nothing leaves a repository without a reviewed commit.
 - **An untagged commit is not refused**; ORIGIN then says `ref: untagged`. Take tagged releases
   only; a reviewer who sees `untagged` asks why.
 

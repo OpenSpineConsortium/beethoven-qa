@@ -370,7 +370,7 @@ def _sync(into: Path, install_kit: bool, source: Path | None = None) -> int:
         print("vendor: the new release no longer has these files; nothing was deleted. Remove them")
         print("        in a reviewed commit (this works whether or not they were committed), then")
         print("        run vendor-check:")
-        print(f"        rm -- {paths} && git add -u -- {VENDOR_DIR}")
+        print(f"        rm -- {paths} && git rm -q --cached --ignore-unmatch -- {paths}")
         return 1
     return 0
 

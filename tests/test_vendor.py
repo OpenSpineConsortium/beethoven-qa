@@ -167,13 +167,19 @@ def test_a_dropped_file_is_listed_never_deleted(tmp_path: Path) -> None:
     assert _check(consumer) == 0
 
 
-def test_the_printed_line_removes_a_dropped_file_never_committed(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("first_copy", ["untracked", "staged", "committed"])
+def test_the_printed_line_removes_a_dropped_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], first_copy: str
 ) -> None:
-    # Taking a second release before committing the first: the printed line must still work.
+    # Taking a second release before committing the first, or after: the printed line must work on
+    # any git (2.55 refuses `git add -u` on a folder it does not track yet; 2.43 did not).
     src = _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
     assert _sync(consumer, install_kit=True, source=src) == 0
+    if first_copy != "untracked":
+        _git(consumer, "add", "-A")
+    if first_copy == "committed":
+        _git(consumer, "commit", "-q", "-m", "the first copy")
     _git(src, "rm", "-q", "src/beethoven_qa/example.py")
     _git(src, "commit", "-q", "-m", "drop the example")
     capsys.readouterr()
@@ -183,7 +189,11 @@ def test_the_printed_line_removes_a_dropped_file_never_committed(
         for text in capsys.readouterr().out.splitlines()
         if text.strip().startswith("rm --")
     )
-    subprocess.run(["bash", "-c", line], cwd=consumer, check=True, capture_output=True)
+    done = subprocess.run(["bash", "-c", line], cwd=consumer, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    dropped = f"{VENDOR_DIR}/src/beethoven_qa/example.py"
+    assert not (consumer / dropped).exists()
+    assert _git(consumer, "ls-files", "--", dropped) == ""
     assert _check(consumer) == 0
 
 
