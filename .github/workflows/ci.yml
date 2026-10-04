@@ -45,7 +45,10 @@ jobs:
       - name: symbolic verification (CrossHair + Z3)
         run: pixi run --locked symbolic
       - name: shell syntax of the kit
-        run: bash -n .githooks/pre-push .claude/hooks/session-start.sh
+        # One file per call: bash -n parses its first operand only and makes the rest positional
+        # parameters, so one call over both files checked the hook alone (measured 2026-10-04).
+        run: |
+          for f in .githooks/pre-push .claude/hooks/session-start.sh; do bash -n "$f" || exit 1; done
 
   plugin:
     # The plugin and its marketplace validate the way Claude Code reads them, and every saved
@@ -67,3 +70,7 @@ jobs:
           HOME="$(mktemp -d)" claude plugin validate plugin
       - name: the workflow scripts parse and avoid what breaks a resume
         run: node tools/check_workflows.mjs
+      - name: the checker refuses what the runtime refuses, and the workflow scripts stop where they must
+        # Node's own test runner: the checker against scripts it must refuse and accept, and the
+        # three workflow scripts run under stand-in hooks, with no agent started.
+        run: node --test tools/check_workflows.test.mjs
