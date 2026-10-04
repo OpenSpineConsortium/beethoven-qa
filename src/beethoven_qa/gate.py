@@ -18,9 +18,14 @@ Two checks; both always run, and the gate fails on either:
 
 A function CrossHair must not run (it reads, writes, asks the clock or starts a process) or cannot
 run (a measured fault of CrossHair's own) is named, with its reason, under
-``[tool.beethoven-qa.unproven]``: it still carries its contracts, which the tests check at run time,
-and the gate prints every entry with its reason on every run, so what is not proven is never hidden
-in a comment the way a directive would hide it.
+``[tool.beethoven-qa.unproven]``: the gate never checks it as a target, and prints every entry with
+its reason on every run, so what is not proven is never hidden in a comment the way a directive
+would hide it. Listing does nothing more than that. CrossHair runs the body of every function a
+contracted target calls, listed or not, and assumes the callee's contracts rather than checking
+them, so a contracted caller of a listed function does the same I/O during the gate and is itself
+kept private, exempt or listed, and a listed function's contracts, assumed by every proven caller,
+are checked by the tests alone. An entry names a function, never a class or a method: a class is
+proven whole, as one target, and I/O stays out of contracted classes.
 
 ``--module`` restricts both checks to one module of the package, which is how the workflows prove
 the module they are working on while the rest of the package is still being brought up to the bar.
@@ -32,13 +37,16 @@ research pipeline run one gate, the same code, each on its own package. It runs 
 ``python -m beethoven_qa gate`` (``pixi run symbolic``).
 
 Why the module is split the way it is: CrossHair executes every contracted function it checks, with
-symbolic arguments. The functions below that carry contracts are pure (they decide, they never
-import, read or start anything); the ones that import the package and start CrossHair are private
-and carry none, so the gate never runs itself symbolically.
+symbolic arguments, and whatever that function calls. The functions below that carry contracts are
+pure (they decide, they never import, read or start anything); the ones that import the package and
+start CrossHair are private, carry none, and are called by no contracted function, so the gate
+never runs itself symbolically. Both halves matter: the gate names only contracted functions as
+targets, but CrossHair runs whatever a target calls.
 """
 
 from __future__ import annotations
 
+import functools
 import importlib
 import inspect
 import os
@@ -182,26 +190,51 @@ def crosshair_command(
 
 
 @beartype
-@ensure(
-    lambda result, targets, listed: set(result[0]) == set(targets) - set(listed),
-    "every target that is not listed is proven, and no listed one",
+@require(
+    lambda functions: len(set(functions)) == len(functions),
+    "each function once, as a module's namespace binds it",
 )
 @ensure(
-    lambda result, targets, listed: set(result[1]) == set(listed) - set(targets),
-    "a listed name that matches no target is reported, and only such a name",
+    lambda result, functions, listed: set(result[0]) == set(functions) - set(listed),
+    "every function that is not listed is proven, and no listed one",
+)
+@ensure(lambda result: len(set(result[0])) == len(result[0]), "nothing is proven twice over")
+@ensure(
+    lambda result, functions, listed: (
+        set(result[1]) | set(result[2]) == set(listed) - set(functions)
+    ),
+    "every listed name that is no function is reported, and only such a name",
 )
 @ensure(
-    lambda result, targets: all(t in targets for t in result[0]), "nothing is proven twice over"
+    lambda result, classes: all(
+        any(n == c or n.startswith(c + ".") for c in classes) for n in result[1]
+    ),
+    "a name reported as a class or a member of one is one",
+)
+@ensure(
+    lambda result, classes: (
+        not any(n == c or n.startswith(c + ".") for n in result[2] for c in classes)
+    ),
+    "a name reported as stale names no class and no member of one",
 )
 def set_aside(
-    targets: tuple[str, ...], listed: tuple[str, ...]
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Split the targets into those CrossHair proves and the ``unproven`` entries that name no
-    target (a function renamed, removed or never contracted: an entry that hides nothing must go).
+    functions: tuple[str, ...], classes: tuple[str, ...], listed: tuple[str, ...]
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Split the contracted functions into those CrossHair proves and the ``unproven`` entries
+    that name no function: the ones that name a class or a member of one (a class is proven
+    whole, so such an entry would hide every method, and a method is never a target), and the
+    stale ones (a function renamed, removed or never contracted: an entry that hides nothing must
+    go).
     """
     named = set(listed)
-    found = set(targets)
-    return tuple(t for t in targets if t not in named), tuple(n for n in listed if n not in found)
+    found = set(functions)
+    misnamed = tuple(
+        n
+        for n in listed
+        if n not in found and any(n == c or n.startswith(c + ".") for c in classes)
+    )
+    stale = tuple(n for n in listed if n not in found and n not in misnamed)
+    return tuple(f for f in functions if f not in named), misnamed, stale
 
 
 class GateConfig(BaseModel):
@@ -213,7 +246,8 @@ class GateConfig(BaseModel):
     package: str
     src: str = "src"
     exempt: tuple[str, ...] = ()
-    # Function (``<module>.<function>``) to the reason CrossHair never runs it.
+    # Function (``<module>.<function>``, never a class or a method) to the reason the gate never
+    # checks it as a target.
     unproven: dict[str, str] = Field(default_factory=dict)
     per_condition_timeout: PositiveInt = Field(default=20, le=600)
 
@@ -281,8 +315,11 @@ def _class_has_contracts(cls: type) -> bool:
 
 
 class _Found(NamedTuple):
-    # What the import of the package found, and what kept part of it out of sight.
+    # What the import of the package found: the modules that imported, the name of every module
+    # the walk yielded (imported or not: a module that failed keeps its place in the tree, so its
+    # entries stay its own), and what kept part of it out of sight.
     modules: list[ModuleType]
+    names: list[str]
     problems: list[str]
 
 
@@ -307,7 +344,7 @@ def _modules(config: GateConfig, root: Path) -> _Found:
 
     package = load(config.package)
     if package is None:
-        return _Found([], problems)
+        return _Found([], [], problems)
     names = [config.package] + [
         info.name
         for info in pkgutil.walk_packages(
@@ -336,7 +373,7 @@ def _modules(config: GateConfig, root: Path) -> _Found:
             problems.append(
                 f"{path.relative_to(root)} was not imported as a module of {config.package}"
             )
-    return _Found(modules, problems)
+    return _Found(modules, names, problems)
 
 
 def _home(obj: object, module: ModuleType, package: str) -> str:
@@ -344,7 +381,11 @@ def _home(obj: object, module: ModuleType, package: str) -> str:
     # counts in its own module when that module binds it, publicly, under its own name; one from
     # outside the package is someone else's; anything else (a private function re-exported under
     # a public name, a wrapper whose __module__ names the decorator's) counts where it is bound.
-    owner = getattr(obj, "__module__", None) or getattr(_unwrap(obj), "__module__", None)
+    # A partial's own __module__ is functools' and it has no __name__, so the function it binds
+    # says where it is from, and one over package code counts where it is bound.
+    inner = _unwrap(obj)
+    owner = getattr(inner if isinstance(obj, functools.partial) else obj, "__module__", None)
+    owner = owner or getattr(inner, "__module__", None)
     if not isinstance(owner, str):
         return module.__name__
     if owner != package and not owner.startswith(package + "."):
@@ -410,12 +451,13 @@ def _contracted_models(modules: list[ModuleType]) -> list[str]:
     )
 
 
-def _targets(modules: list[ModuleType], package: str) -> tuple[list[str], list[str]]:
+def _targets(modules: list[ModuleType], package: str) -> tuple[list[str], list[str], list[str]]:
     # What CrossHair proves, named one by one so the targets can be proven side by side: every
     # contracted function each module counts as its own, and every class it defines that carries
-    # invariants or a contracted member. Classes with nothing to check are returned apart, to be
-    # named, never counted.
-    targets: list[str] = []
+    # invariants or a contracted member; the two apart, since only a function can be set aside.
+    # Classes with nothing to check are returned apart as well, to be named, never counted.
+    functions: list[str] = []
+    classes: list[str] = []
     bare: list[str] = []
     for module in modules:
         for name, obj in vars(module).items():
@@ -423,7 +465,7 @@ def _targets(modules: list[ModuleType], package: str) -> tuple[list[str], list[s
             if inspect.isclass(obj):
                 if obj.__module__ != module.__name__:
                     continue
-                (targets if _class_has_contracts(obj) else bare).append(qualified)
+                (classes if _class_has_contracts(obj) else bare).append(qualified)
             elif (
                 callable(obj)
                 and not inspect.ismodule(obj)
@@ -431,8 +473,8 @@ def _targets(modules: list[ModuleType], package: str) -> tuple[list[str], list[s
                 and not _is_async(obj)
                 and _home(obj, module, package) == module.__name__
             ):
-                targets.append(qualified)
-    return sorted(targets), sorted(bare)
+                functions.append(qualified)
+    return sorted(functions), sorted(classes), sorted(bare)
 
 
 def _directives(paths: list[Path], root: Path) -> list[str]:
@@ -517,15 +559,27 @@ def _run(root: Path, only: str | None = None, report_all: bool = False) -> int:
     # Each condition may take up to its whole bound when its inputs are unbounded (strings, tuples),
     # so one CrossHair process over the package costs the sum of every bound; one process per
     # function or class, as many at a time as there are cores, costs about the largest.
-    targets, bare = _targets(modules, config.package)
+    functions, classes, bare = _targets(modules, config.package)
     scope = only or config.package
+    # Under --module, every entry under the module is that module's and is reported there, never
+    # dropped (a method entry, pkg.mod.Class.m, included); only an entry under a deeper module of
+    # the package (pkg.mod.sub.f, when the module is a package) belongs elsewhere. Deeper means
+    # every module the walk found, imported or not: an entry for one that failed to import would
+    # otherwise be matched against this module's functions and called stale, with the failure,
+    # the real cause, printed only under that module's own run.
+    deeper = tuple(f"{n}." for n in found.names if only and n.startswith(f"{only}."))
     listed = {
         name: why
         for name, why in config.unproven.items()
-        if only is None or name.rpartition(".")[0] == only
+        if only is None or (name.startswith(f"{only}.") and not name.startswith(deeper))
     }
-    proven, stale = set_aside(tuple(targets), tuple(listed))
-    targets = list(proven)
+    proven, misnamed, stale = set_aside(tuple(functions), tuple(classes + bare), tuple(listed))
+    targets = sorted([*proven, *classes])
+    problems += [
+        f"unproven entry {name} names a class of {scope} or a method of one: a class is proven "
+        "whole, and I/O stays out of a contracted class; remove the entry"
+        for name in misnamed
+    ]
     problems += [
         f"unproven entry {name} names no contracted function of {scope}: remove the entry"
         for name in stale
@@ -540,7 +594,7 @@ def _run(root: Path, only: str | None = None, report_all: bool = False) -> int:
     )
     if bare:
         print(f"gate: classes with no contracts, nothing to check: {', '.join(bare)}")
-    for name in sorted(set(listed) - set(stale)):
+    for name in sorted(set(listed) - set(misnamed) - set(stale)):
         print(f"gate: not proven, contracts checked at run time only: {name}: {listed[name]}")
     pythonpath = os.pathsep.join(
         p for p in (str(root / config.src), os.environ.get("PYTHONPATH", "")) if p

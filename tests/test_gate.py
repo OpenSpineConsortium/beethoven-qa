@@ -8,6 +8,7 @@ checks, so "the gate is green" is shown to mean something.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -73,11 +74,17 @@ def test_crosshair_command_applies_the_declared_bound() -> None:
 
 
 def test_set_aside() -> None:
-    targets = ("pkg.a.f", "pkg.a.g", "pkg.b.C")
-    assert set_aside(targets, ("pkg.a.g",)) == (("pkg.a.f", "pkg.b.C"), ())
-    split = set_aside(targets, ("pkg.a.gone", "pkg.a.f"))
-    assert split == (("pkg.a.g", "pkg.b.C"), ("pkg.a.gone",))
-    assert set_aside((), ()) == ((), ())
+    functions = ("pkg.a.f", "pkg.a.g")
+    classes = ("pkg.b.C",)
+    assert set_aside(functions, classes, ("pkg.a.g",)) == (("pkg.a.f",), (), ())
+    split = set_aside(functions, classes, ("pkg.a.gone", "pkg.a.f"))
+    assert split == (("pkg.a.g",), (), ("pkg.a.gone",))
+    # A class, or a method of one, is refused as such; a name that only resembles one is stale.
+    split = set_aside(functions, classes, ("pkg.b.C", "pkg.b.C.load", "pkg.b.Cx"))
+    assert split == (functions, ("pkg.b.C", "pkg.b.C.load"), ("pkg.b.Cx",))
+    assert set_aside((), (), ()) == ((), (), ())
+    with pytest.raises(ViolationError):  # a function named twice would be proven twice over
+        set_aside(("pkg.a.f", "pkg.a.f"), (), ())
 
 
 def test_config_boundary() -> None:
@@ -116,11 +123,11 @@ def _repo(tmp_path: Path, module: str) -> Path:
     return tmp_path
 
 
-def _gate(root: Path) -> subprocess.CompletedProcess[str]:
+def _gate(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     # The command exactly as a consuming repository runs it, in a fresh interpreter, so the toy
     # package is imported clean and this package comes from src/ as it would from a vendored copy.
     return subprocess.run(
-        [sys.executable, "-m", "beethoven_qa", "gate", "--root", str(root)],
+        [sys.executable, "-m", "beethoven_qa", "gate", "--root", str(root), *args],
         cwd=root,
         env={"PYTHONPATH": str(SRC), "PATH": "/usr/bin:/bin"},
         capture_output=True,
@@ -214,6 +221,16 @@ PROVEN = """
             },
             "toy.api.triple",
         ),
+        # A partial's own __module__ is functools' and it has no __name__: it counts where it is
+        # bound, so a public one over package code is a public function without contracts.
+        (
+            {
+                "logic.py": PROVEN,
+                "part.py": "import functools\n\n\ndef _scale(k: int, x: int) -> int:\n"
+                "    return k * x\n\n\ntriple = functools.partial(_scale, 3)\n",
+            },
+            "toy.part.triple",
+        ),
         # Nothing to prove is not a pass.
         ({"logic.py": "def _helper(x: int) -> int:\n    return x\n"}, "nothing to prove"),
         # CrossHair would check the coroutine object, never the awaited result.
@@ -242,6 +259,7 @@ PROVEN = """
         "directive",
         "cache",
         "re-export",
+        "partial",
         "empty",
         "async",
         "pydantic",
@@ -389,6 +407,142 @@ def test_gate_sets_aside_only_what_is_listed_and_says_so(tmp_path: Path) -> None
         timeout=600,
     )
     assert alone.returncode == 1 and "nothing to prove in toy.io" in alone.stdout, alone.stdout
+
+
+STORE = """
+    from beethoven_qa.contracts import ensure
+
+
+    class Store:
+        def __init__(self, n: int) -> None:
+            self.n = n
+
+        @ensure(lambda self, result: result == self.n + 1)
+        def bump(self) -> int:
+            return self.n + 1
+"""
+
+
+def test_gate_refuses_an_unproven_entry_that_names_a_class_or_a_method(tmp_path: Path) -> None:
+    # A class is proven whole: an entry naming it would take every method and invariant out of the
+    # proof, and one naming a method matches nothing, since methods are never targets.
+    false = STORE.replace("return self.n + 1", "return self.n")  # bump's postcondition fails
+    files = {"__init__.py": "", "logic.py": PROVEN, "store.py": false}
+    table = "[tool.beethoven-qa.unproven]\n"
+    whole = _gate(_toy(tmp_path / "class", files, extra=table + '"toy.store.Store" = "reads"\n'))
+    assert whole.returncode == 1, whole.stdout + whole.stderr
+    assert "toy.store.Store names a class" in whole.stdout and "proven whole" in whole.stdout
+    assert "false when calling bump" in whole.stdout, whole.stdout  # the class was still proven
+
+    entry = '"toy.store.Store.bump" = "reads"\n'
+    method = _gate(_toy(tmp_path / "method", files, extra=table + entry))
+    assert method.returncode == 1 and "toy.store.Store.bump names a class" in method.stdout
+    assert "names no contracted function" not in method.stdout, method.stdout
+
+    # Under --module the entry belongs to its module and is reported there, never dropped; so is
+    # an entry under the module that names nothing at all.
+    root = _toy(tmp_path / "scoped", {**files, "store.py": STORE}, extra=table + entry)
+    scoped = _gate(root, "--module", "toy.store")
+    assert scoped.returncode == 1 and "toy.store.Store.bump names a class" in scoped.stdout
+    stale = '"toy.logic.gone.read" = "renamed since"\n'
+    root = _toy(tmp_path / "stale", {**files, "store.py": STORE}, extra=table + stale)
+    scoped = _gate(root, "--module", "toy.logic")
+    assert scoped.returncode == 1 and "toy.logic.gone.read names no contracted" in scoped.stdout
+
+
+def test_gate_keeps_a_submodule_entry_out_of_its_package_module(tmp_path: Path) -> None:
+    # An entry for toy.sub.mod belongs to that module: the gate on toy.sub (its __init__) neither
+    # reports it as stale nor sets it aside there, and the gate on toy.sub.mod honours it.
+    read = """
+        from beethoven_qa.contracts import ensure
+
+        @ensure(lambda result, x: result != 7)
+        def read(x: int) -> int:
+            return x
+    """
+    files = {"__init__.py": "", "sub/__init__.py": PROVEN, "sub/mod.py": read}
+    table = '[tool.beethoven-qa.unproven]\n"toy.sub.mod.read" = "reads the clock"\n'
+    root = _toy(tmp_path, files, extra=table)
+    package = _gate(root, "--module", "toy.sub")
+    assert package.returncode == 0, package.stdout + package.stderr
+    assert "toy.sub.mod.read" not in package.stdout, package.stdout
+    module = _gate(root, "--module", "toy.sub.mod")
+    assert module.returncode == 1 and "nothing to prove in toy.sub.mod" in module.stdout
+    assert "toy.sub.mod.read: reads the clock" in module.stdout, module.stdout
+
+
+def test_gate_keeps_an_entry_with_a_submodule_that_failed_to_import(tmp_path: Path) -> None:
+    # The same, when toy.sub.broken fails to import: it is then among no loaded module, but its
+    # entry is still its own, not toy.sub's. The gate on toy.sub must not report the entry as
+    # stale (a wrong-but-plausible verdict that hides the import failure behind "remove the
+    # entry"); the gate on toy.sub.broken says why it is not a checked module; the whole run
+    # reports the failure, and the entry beside it, since the module it names holds nothing yet.
+    files = {"__init__.py": "", "sub/__init__.py": PROVEN, "sub/broken.py": "1 / 0\n"}
+    table = '[tool.beethoven-qa.unproven]\n"toy.sub.broken.read" = "reads the clock"\n'
+    root = _toy(tmp_path, files, extra=table)
+    package = _gate(root, "--module", "toy.sub")
+    assert package.returncode == 0, package.stdout + package.stderr
+    assert "toy.sub.broken.read" not in package.stdout, package.stdout
+    module = _gate(root, "--module", "toy.sub.broken")
+    assert module.returncode == 2 and "ZeroDivisionError" in module.stdout, module.stdout
+    whole = _gate(root)
+    assert whole.returncode == 1, whole.stdout + whole.stderr
+    assert "importing toy.sub.broken failed: ZeroDivisionError" in whole.stdout, whole.stdout
+    assert "toy.sub.broken.read names no contracted" in whole.stdout, whole.stdout
+
+
+def test_a_proven_caller_runs_a_listed_function_and_assumes_its_contracts(tmp_path: Path) -> None:
+    # What listing does and does not do, pinned so the documents can say it: the gate never checks
+    # a listed function as a target, but CrossHair runs its body while proving a contracted caller
+    # (the I/O happens during the gate) and takes its contracts as given (a false one is never
+    # found through the caller; at run time it is the listed function's own check that fires).
+    clock = """
+        from beethoven_qa.contracts import ensure
+
+        @ensure(lambda result: result > 0)
+        def now(seed: int) -> int:
+            return seed
+
+        @ensure(lambda result, seed: result > 1)
+        def later(seed: int) -> int:
+            return now(seed) + 1
+    """
+    table = '[tool.beethoven-qa.unproven]\n"toy.clock.now" = "reads the clock"\n'
+    root = _toy(tmp_path / "clock", {"__init__.py": "", "clock.py": clock}, extra=table)
+    assumed = _gate(root)
+    assert assumed.returncode == 0, assumed.stdout + assumed.stderr
+    assert "toy.clock.now: reads the clock" in assumed.stdout
+    fired = subprocess.run(
+        [sys.executable, "-c", "from toy.clock import later\nlater(0)\n"],
+        env={"PYTHONPATH": f"{root / 'src'}{os.pathsep}{SRC}", "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert fired.returncode != 0 and "ViolationError" in fired.stderr, fired.stderr
+    assert "result > 0" in fired.stderr, fired.stderr  # now's condition, not later's
+
+    store = """
+        from pathlib import Path
+
+        from beethoven_qa.contracts import ensure
+
+        @ensure(lambda result: isinstance(result, str))
+        def load() -> str:
+            text = Path(__file__).with_name("accounts.txt").read_text(encoding="utf-8")
+            if "boom" in text:
+                raise RuntimeError("load ran during the gate")
+            return text
+
+        @ensure(lambda result, x: len(result) <= 1)
+        def first(x: int) -> str:
+            return load()[:1]
+    """
+    files = {"__init__.py": "", "store.py": store, "accounts.txt": "boom\n"}
+    table = '[tool.beethoven-qa.unproven]\n"toy.store.load" = "reads the account list"\n'
+    ran = _gate(_toy(tmp_path / "store", files, extra=table))
+    assert ran.returncode != 0 and "load ran during the gate" in ran.stdout, ran.stdout
+    assert "toy.store.load: reads the account list" in ran.stdout
 
 
 def test_gate_refuses_a_package_imported_from_elsewhere(tmp_path: Path) -> None:
