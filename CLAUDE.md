@@ -1,0 +1,216 @@
+# beethoven-qa — working context
+
+This repository is **how code for the Beethoven engine is written and proven before it may run**:
+greg's "code writing software framework, pixi concolic etc", the software quality assurance
+repository of the three-way split of `OpenSpineConsortium/beethoven-research` (greg, 2026-10-04
+04:52Z; `/mnt/project-files/plan/REPO_SPLIT.md`). It holds the definition of done, the contracts
+and the layering rule, the CrossHair/Z3 gate as a command any repository runs on its own package,
+the pinned copy that consuming repositories carry, the repository kit every repository shares, and
+the Claude Code plugin through which a session writes new code to that bar and brings existing code
+up to it. Its consumers are `beethoven-agents` (the nested agentic framework) and the research
+pipeline (REFORMS, CLAIM, the studies); it depends on nothing of ours, and nothing here may import
+either of them.
+
+Vendor: Gregory Schwing, trading as OpenSpineConsortium. Beethoven runs Claude Code and is not an
+Anthropic product; "Claude" and "Claude Code" are Anthropic's marks, used here to say what it runs;
+"Open OnDemand" is the mark of its publisher.
+
+## Read first
+
+- `/mnt/project-files/plan/REPO_SPLIT.md`: the boundary between the three repositories, the
+  direction of dependence and how this one is consumed. `/mnt/project-files/plan/BUILD_PLAN.md`
+  section 3 is the definition of done this repository implements; the plan governs.
+- `docs/CONSUMING.md` (adopting beethoven-qa in a repository), `docs/PARALLEL_BUILD.md`
+  (worktrees, the stream agent and workflow scripts for building in parallel).
+- `plugin/skills/`: `definition-of-done`, `write-verified-module`, `improve-existing-module`,
+  `review-contracts`. They are the working instructions for writing code here and in every consumer.
+- `hpcworker`'s `CLAUDE.md` for the grid facts and the launcher's non-negotiables, which hold here.
+
+## Decisions that are settled (do not reopen)
+
+- **D1 — own subscriptions, no keys.** Everything that calls Claude runs on a flat-rate Claude plan
+  held in the person's own name. No pooled or commercial API keys, no gateway, no Bedrock or Vertex,
+  no key rotation. The plugin's workflows run in the session that starts them, on that session's own
+  sign-in; nothing here starts Claude Code any other way.
+- **D2 as refined by the split (greg, 2026-10-04 04:52Z).** The engine is three repositories:
+  this one (Goal 1 and the repository rules), `beethoven-agents` (Goals 3, 4 and 5, accounts and
+  the super-master, decisions D3 and D4) and the research pipeline (Goals 2, 6 and 7 and the
+  studies), with qa <- agents <- research the only direction of dependence. A change here that
+  needs anything of theirs is in the wrong repository.
+
+## Non-negotiables (carried from the launcher and the engine; they bind here too)
+
+- **Never touch a Claude credential.** No `setup-token`, no `CLAUDE_CODE_OAUTH_TOKEN`, no
+  `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, no reading `.credentials.json` under any
+  configuration directory, never `claude auth logout`. Nothing in this repository reads, stores,
+  copies, prints or relays one; the plugin never asks for one and no skill suggests one.
+- **Usage credits are never used**, by anyone, for anything (greg, 2026-10-04; BUILD_PLAN section 2
+  C7). Nothing here treats them as an option or a default; a spent window is waited out.
+- **No code on claude.ai and no interception of it.** No proxy, no parser of its traffic, nothing.
+- **Secrets never appear on a command line, in argv, in logs, in job files or in `sbatch --export`.**
+  Never echo one. The only secret any workflow here names is the maintainer's `RULESETS_TOKEN`,
+  read from the Actions secret into the environment of the one step that needs it.
+- **No remote code.** No `eval`, no `new Function`, no fetched-and-run scripts.
+  `tools/check_workflows.mjs` checks the workflow scripts with `node --check` on a copy, never by
+  running them.
+- **Nothing is deleted outside a run's own directories and node-local temp.** Never the Claude Code
+  login directory, the workspace, another run or anything else under `$HOME`. The pinned-copy
+  command honours it in its own way: it writes only under `vendor/beethoven-qa/` and the four kit
+  paths of the repository it is pointed at, refuses to overwrite uncommitted work there, and never
+  deletes; a file a new release dropped is listed for the person to remove in a reviewed commit.
+- **Grid etiquette**: anything that runs a container, a scheduler call or Claude Code on the grid
+  runs inside a Slurm job on a compute node; nothing container-related on the login node; temp on
+  the node's local disk (`$TMPDIR` on Wayne State is CephFS, never trusted). The gate runs CrossHair
+  as many processes as the allocation has cores (`os.sched_getaffinity`), never more.
+- **Names and words.** The Beethoven name and the trademark sentence above stand wherever the
+  product is described. Never use the word that starts "prov" and ends "enance" for the history of
+  a file or data; say origin, source, lineage or record (the pinned copy's record is `ORIGIN`).
+  Versions are integers (1.0.0); `pyproject.toml`, `beethoven_qa.__version__`, the plugin manifest
+  and the release tag carry the same one.
+
+## The definition of done (Goal 1) — what this repository exists to enforce
+
+No module is done, and the gate will not let it enter a run or reach `main`, until it clears:
+
+1. **Deterministic environment.** It resolves inside `pixi.lock` (exact versions, build strings,
+   hashes, `linux-64`) and runs inside the hashed Apptainer image (built in `beethoven-agents`,
+   `--fakeroot`, run `--containall --cleanenv --no-home`).
+2. **Design by Contract.** `icontract` `@require`/`@ensure`/invariants on every public function,
+   imported from `beethoven_qa.contracts`; subclasses only weaken preconditions and strengthen
+   postconditions. `@beartype` outermost, the contracts beneath it (measured, see `contracts.py`).
+3. **Layered runtime types.** `pydantic` at external boundaries, `beartype` on internal hot paths,
+   `typeguard` only in the test enclave (`tests/conftest.py`'s import hook).
+4. **Symbolic proof.** CrossHair + Z3 find no input that satisfies the preconditions and violates a
+   postcondition within the declared per-condition bound. Contracted functions are pure; reading,
+   importing, writing and starting processes stay in private, uncontracted functions or in the
+   exempt command-line module, because CrossHair executes what it checks. A public function that
+   must do I/O keeps its contracts (the tests check them at run time) and is named, with its
+   reason, under `[tool.beethoven-qa.unproven]`; so is logic CrossHair measurably cannot run (the
+   reason names the fault). The gate prints every entry on every run and refuses a stale one.
+5. **Schema-aligned parsing** (BAML/SAP) for any LLM-structured output: coercive repair with
+   validation feedback, never a hard crash. Not built yet (Linear G1-4); it lands here.
+6. **The SpecPylot loop.** Code and contracts, the gate, the counterexample fed back, again until
+   proven; humans review the contracts, not the lines (`/beethoven-qa:verify-module`,
+   `/beethoven-qa:improve-module`, the `review-contracts` skill). A green gate over vacuous
+   contracts proves nothing, which is why `improve-module` ends with two skeptics looking for them.
+7. **The gate before every push, and no human gate on a merge** (greg, 2026-10-04 02:11Z).
+   `.githooks/pre-push` runs `pixi run --locked gate` (without `--locked`, pixi re-solves a
+   manifest that drifted from its lock and gates an environment the commit does not record);
+   `SKIP_GATE=1` skips it only knowingly, and the commit says why. The same gate is the required
+   check on `main` (`.github/rulesets/main.json`, applied by `rulesets.yml` with
+   `RULESETS_TOKEN`); pull requests open ready for review, never as drafts; `automerge.yml` arms
+   auto-merge and the required checks alone decide.
+
+Never skip, disable or quarantine a test, loosen a symbolic bound, remove a contract, narrow a
+precondition to exclude an input the callers really pass, add a `# crosshair:` directive, exempt
+a module that holds logic, or set aside under `unproven` a function CrossHair can run, to get
+green. A precondition that states the function's real domain, which no caller ever leaves, is not
+dodging (see `vendor.stale_files`).
+
+## What this repository provides
+
+- `beethoven_qa.contracts`: the one import point for the contract decorators.
+- `beethoven_qa.gate` and `python -m beethoven_qa gate [--module <pkg.mod>] [--report-all]`: both
+  checks always run. Check 1: every public function of the package named in `[tool.beethoven-qa]`
+  carries contracts, and nothing hides one from CrossHair (a `.py` file that is not one of the
+  package's modules, a module that fails or exits on import, a `# crosshair:` directive, a public
+  coroutine, a contracted pydantic model, a package with nothing to prove: each fails the gate).
+  Check 2: CrossHair + Z3 over every contracted function and every class that carries contracts
+  (but the functions set aside, with their reasons, under `[tool.beethoven-qa.unproven]`),
+  one process per target, as many at a time as the allocation has cores (`BEETHOVEN_QA_JOBS` can
+  lower it, never raise it), each condition bounded by `per_condition_timeout`. `--module` limits
+  both checks to one module; `--report-all` prints every condition's verdict and fails on a
+  precondition no input can meet.
+- `beethoven_qa.vendor`, `python -m beethoven_qa vendor --into <repo> [--kit]` and
+  `python -m beethoven_qa vendor-check [--source <beethoven-qa checkout>]`: the pinned copy at
+  `vendor/beethoven-qa/`, read from the release commit's own objects, with its `ORIGIN` record, and
+  the check that the copy and the kit files (bytes and executable bit) are untouched. The plain
+  check catches an edit that leaves ORIGIN alone; an edit that also rewrites ORIGIN is caught only
+  with `--source`, which rebuilds the tree from the commit ORIGIN names (docs/CONSUMING.md).
+- The repository kit, carried byte for byte by every consumer: `.githooks/pre-push`,
+  `.github/workflows/automerge.yml`, `.github/workflows/rulesets.yml`,
+  `.claude/hooks/session-start.sh`. Change one here and every consumer takes it with its next copy.
+- `plugin/` and `.claude-plugin/marketplace.json`: the Claude Code plugin `beethoven-qa` (skills,
+  the `stream` agent, the workflows `gate-until-green`, `verify-module`, `improve-module`). On a
+  laptop: `/plugin marketplace add OpenSpineConsortium/beethoven-qa`, then
+  `/plugin install beethoven-qa@beethoven-qa`; for work inside this checkout,
+  `claude --plugin-dir plugin`. On the grid the agents' image registers the copy as a `directory`
+  marketplace in its managed settings. A cloud project thread does not add a repository's
+  marketplaces (no trust dialog there), so it reads this checkout and runs a workflow with the
+  Workflow tool's `scriptPath` (for example `plugin/workflows/verify-module.js`).
+- `src/beethoven_qa/example.py`: the worked example that clears steps 1 to 4, so the gate is
+  demonstrably real.
+
+## Measured (2026-10-04, this cloud session, 4 cores; CrossHair 0.0.111)
+
+- The gate found real gaps in its own drafts twice: `uncontracted`'s postconditions are false when
+  two entries share a qualified name, which a module's namespace never allows (the precondition now
+  says so); and `crosshair_command`'s first `--report-all` postcondition held for a target named
+  `--report_all` (the postcondition now looks at the flag's position, and a target is never an
+  option).
+- One CrossHair process over the package took 5 min 43 s; one process per target, four at a time,
+  took 2 min 8 s for the same checks. A condition over unbounded inputs (strings, tuples) runs to
+  its whole bound when no counterexample exists, so the gate's time grows with the number of such
+  postconditions, divided by the cores. The whole `pixi run --locked gate` here (45 tests, 10
+  targets) took 2 min 35 s; beethoven-agents' (277 tests, 34 targets: the guard and the account
+  switch) 5 min 3 s. Neither is yet measured on a GitHub runner or a grid node.
+- The account switch, built in beethoven-research with 53 `# crosshair:` comments (26 switching
+  CrossHair off, 27 lowering the bound to 2 to 6 s), clears this gate without them: its 25
+  functions that do I/O or that CrossHair cannot run are listed under `unproven` with reasons, one
+  it had switched off (`utc_text`) proves, and every other condition holds at the full 20 s.
+- CrossHair 0.0.111 raises an internal `assert False` in its string comparison when it sorts
+  symbolic strings holding NUL characters; it is reported as an exception in the function under
+  check. Stating the real domain as a precondition kept it away (`vendor.stale_files`). A report
+  that points inside CrossHair's own `libimpl` is a tool fault to work around and record, never a
+  reason to loosen a contract.
+- CrossHair 0.0.111 does not construct a pydantic model: a contracted method on one was reported
+  "Not confirmed", and a broken one that returned more than the window held passed. The gate now
+  refuses contracts on a pydantic model; models stay boundaries and the logic lives in contracted
+  functions (`example.Window`).
+- An adversarial review of this repository before its first push (four lenses, each finding
+  reproduced by a second agent) confirmed 46 findings: among them two ways the copy command could
+  write outside its directory through a committed link, files `git status` hides being overwritten,
+  and eight ways a function could escape the gate (a directory without `__init__.py`, an import
+  that exits 0, a `# crosshair: off` comment, a cached or re-exported function, a coroutine, an
+  empty package, a package imported from another checkout). Each has a test that fails on the code
+  before the fix (`tests/test_gate.py`, `tests/test_vendor.py`).
+
+## Build and test
+
+```sh
+pixi install --locked         # reconstruct the exact env from the lock; CI uses --locked too
+pixi run --locked gate        # lint (ruff) + typecheck (mypy strict) + tests (pytest) + symbolic (CrossHair/Z3)
+pixi run --locked symbolic    # just the gate: python -m beethoven_qa gate
+pixi run --locked python -m beethoven_qa gate --module beethoven_qa.vendor --report-all   # one module
+pixi run hooks                # point git at .githooks (the session-start hook does this in a cloud session)
+```
+
+A Claude Code cloud session with only this repository gets pixi and the locked environment from
+`.claude/hooks/session-start.sh`; a project thread with several repositories does not read it and
+needs the same commands as the environment's setup script. In this cloud environment `pixi` lands at
+`~/.pixi/bin`, which is not on the Bash tool's `PATH`: export it before `git push`, or the pre-push
+hook fails.
+
+## Layout
+
+- `pixi.toml` / `pixi.lock` — the verification stack, pinned for `linux-64`.
+- `src/beethoven_qa/` — `contracts.py`, `gate.py`, `vendor.py`, `example.py`, `__main__.py` (the
+  command line; exempt from the contract rule as wiring and I/O).
+- `tests/` — pytest under typeguard's import hook.
+- `plugin/` — the Claude Code plugin; `.claude-plugin/marketplace.json` — the marketplace listing it.
+- `tools/check_workflows.mjs` — CI's syntax check of the workflow scripts.
+- `docs/` — `CONSUMING.md`, `PARALLEL_BUILD.md`.
+- `.githooks/`, `.github/`, `.claude/` — the kit, the CI lanes, the rule as code, session settings.
+
+## How to be useful here
+
+The recurring failure mode across these projects is a number or a state that is wrong but plausible
+— a fabricated hash, a lock that was hand-edited, a "passed" that never ran, a contract that is true
+of everything. Check against something outside the computation: regenerate the lock and diff it,
+run the gate and read its counterexample, make a contract fail on purpose before trusting that it
+passes. Never commit a lockfile or a digest you did not produce with the tool. Say plainly what is
+not known; "not yet measured" is the preferred form.
+
+Every unit of build work appends one row to `/mnt/project-files/ledger/LEDGER.md` (format in
+`ledger/README.md`): date, thread, actor, activity, wall-minutes, bugs fixed, inputs, outputs, how
+it was verified. Re-read the file just before appending — other threads write it too.
