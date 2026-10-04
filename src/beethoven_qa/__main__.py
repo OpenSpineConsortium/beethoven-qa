@@ -47,7 +47,10 @@ def _parser() -> argparse.ArgumentParser:
     c.add_argument(
         "--source",
         type=Path,
-        help="a beethoven-qa checkout: also rebuild the copy from the commit its ORIGIN names",
+        help=(
+            "the beethoven-qa checkout this command runs from (its own environment): also rebuild "
+            "the copy from the commit its ORIGIN names; refused from anywhere else"
+        ),
     )
     return parser
 

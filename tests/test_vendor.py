@@ -8,22 +8,31 @@ and a dropped file are each caught; and nothing is ever deleted by the command.
 
 from __future__ import annotations
 
+import importlib.util
+import marshal
 import os
+import py_compile
 import shutil
+import struct
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from beethoven_qa import vendor
 from beethoven_qa.contracts import ViolationError
 from beethoven_qa.vendor import (
     COPY_ROOTS,
     KIT,
+    KIT_EXECUTABLE,
     ORIGIN_NAME,
     VENDOR_DIR,
     Origin,
     _check,
+    _git_env,
+    _git_local_env,
     _measure,
     _sync,
     is_safe_relpath,
@@ -35,17 +44,66 @@ REPO = Path(__file__).resolve().parent.parent
 H = "a" * 64
 
 
-def _git(cwd: Path, *args: str) -> str:
+def _env(**extra: str) -> dict[str, str]:
+    # The environment of everything this file spawns that may run git: hermetic, so the throwaway
+    # repositories see neither the developer's global and system git configuration (a signing key
+    # or tag.gpgSign would turn `commit` and `tag` into failures) nor the repository a hook's
+    # environment names in GIT_DIR (a pre-push hook of a linked worktree carries one, and git
+    # would act on that repository whatever -C names). vendor.py's own scrub is the base, so the
+    # tests and the code drop the same repository names. The two configuration carriers the code
+    # keeps (a container lane gives safe.directory that way) are dropped here all the same: the
+    # throwaway repositories are the running user's own and need no safe.directory, and a push
+    # made as `git -c tag.gpgSign=true push` would otherwise carry that setting through the
+    # pre-push hook into every release tag written below. Python is told not to write byte-code
+    # caches: one written into a throwaway checkout makes it dirty, and the next copy from it is
+    # refused.
     env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "test",
-        "GIT_AUTHOR_EMAIL": "test@example.invalid",
-        "GIT_COMMITTER_NAME": "test",
-        "GIT_COMMITTER_EMAIL": "test@example.invalid",
+        key: value
+        for key, value in _git_env().items()
+        if key not in vendor._GIT_CONFIG_ENV
+        and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
     }
+    env.update(
+        GIT_CONFIG_GLOBAL="/dev/null",
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_AUTHOR_NAME="test",
+        GIT_AUTHOR_EMAIL="test@example.invalid",
+        GIT_COMMITTER_NAME="test",
+        GIT_COMMITTER_EMAIL="test@example.invalid",
+        PYTHONDONTWRITEBYTECODE="1",
+    )
+    env.update(extra)
+    return env
+
+
+def _git(cwd: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True, env=env
+        ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True, env=_env()
     ).stdout
+
+
+def _vendor_check(code: Path | str, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    # `python -m beethoven_qa vendor-check` the way an environment runs it: ``code`` is the src/
+    # directory whose package does the checking (a consumer's copy, or a beethoven-qa checkout),
+    # or a PYTHONPATH of several, in the order the environment would put them.
+    return subprocess.run(
+        [sys.executable, "-m", "beethoven_qa", "vendor-check", "--root", str(root), *args],
+        env=_env(PYTHONPATH=str(code)),
+        capture_output=True,
+        text=True,
+    )
+
+
+def _printed_line(out: str) -> str:
+    # The `rm -- ... && git rm ...` line vendor prints for files a release dropped.
+    return next(text.strip() for text in out.splitlines() if text.strip().startswith("rm --"))
+
+
+def _run_line(consumer: Path, line: str) -> subprocess.CompletedProcess[str]:
+    # The printed line, run in the consumer the way the person would.
+    return subprocess.run(
+        ["bash", "-c", line], cwd=consumer, env=_env(), capture_output=True, text=True
+    )
 
 
 def _init(path: Path) -> Path:
@@ -184,12 +242,7 @@ def test_the_printed_line_removes_a_dropped_file(
     _git(src, "commit", "-q", "-m", "drop the example")
     capsys.readouterr()
     assert _sync(consumer, install_kit=True, source=src) == 1
-    line = next(
-        text.strip()
-        for text in capsys.readouterr().out.splitlines()
-        if text.strip().startswith("rm --")
-    )
-    done = subprocess.run(["bash", "-c", line], cwd=consumer, capture_output=True, text=True)
+    done = _run_line(consumer, _printed_line(capsys.readouterr().out))
     assert done.returncode == 0, done.stderr
     dropped = f"{VENDOR_DIR}/src/beethoven_qa/example.py"
     assert not (consumer / dropped).exists()
@@ -313,11 +366,12 @@ def test_check_sees_links_caches_and_the_executable_bit(tmp_path: Path) -> None:
 
 def test_a_rewritten_origin_is_caught_only_against_the_source(tmp_path: Path) -> None:
     # The limit vendor-check states: an edit that also rewrites ORIGIN passes the plain check, and
-    # the check against a beethoven-qa checkout catches it.
+    # the check against a beethoven-qa checkout, run from that checkout's own code, catches it.
     src = _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
     assert _sync(consumer, install_kit=True, source=src) == 0
-    assert _check(consumer, source=src) == 0
+    anchored = _vendor_check(src / "src", consumer, "--source", str(src))
+    assert anchored.returncode == 0 and "and the commit it names" in anchored.stdout
     target = consumer / VENDOR_DIR / "src/beethoven_qa/gate.py"
     target.write_text(target.read_text(encoding="utf-8") + "\n# edited\n", encoding="utf-8")
     origin_file = consumer / VENDOR_DIR / ORIGIN_NAME
@@ -327,7 +381,262 @@ def test_a_rewritten_origin_is_caught_only_against_the_source(tmp_path: Path) ->
     forged = origin.model_copy(update={"tree_sha256": measured[0], "files": measured[1]})
     origin_file.write_text(forged.render(), encoding="utf-8")
     assert _check(consumer) == 0
-    assert _check(consumer, source=src) == 1
+    anchored = _vendor_check(src / "src", consumer, "--source", str(src))
+    assert anchored.returncode == 1 and "is not the tree of commit" in anchored.stdout
+
+
+def test_the_anchored_check_runs_only_from_the_checkout_it_is_given(tmp_path: Path) -> None:
+    # The consumer's environment imports the copy, so `vendor-check --source` run there is the
+    # copy checking itself, and a copy whose vendor.py vouches for itself passes with ORIGIN
+    # untouched. The anchored form therefore runs only from the source checkout's own code.
+    src = _source(tmp_path)
+    consumer = _init(tmp_path / "consumer")
+    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _check(consumer, source=src) == 1  # this process runs REPO's code, not src's
+    copy = consumer / VENDOR_DIR / "src"
+    refused = _vendor_check(copy, consumer, "--source", str(src))
+    assert refused.returncode == 1 and "not the checkout this command runs from" in refused.stdout
+    assert _vendor_check(copy, consumer).returncode == 0  # the plain check is the copy's to run
+
+    vouching = (
+        "\n\ndef _check(root, source=None):\n    print('vouching for myself')\n    return 0\n"
+    )
+    with (copy / "beethoven_qa/vendor.py").open("a", encoding="utf-8") as fh:
+        fh.write(vouching)
+    assert _vendor_check(copy, consumer).returncode == 0  # the limit the plain check states
+    # Nor does an edited copy refuse the anchored form, which is why the documented line runs it
+    # from beethoven-qa's own environment and never the consumer's.
+    assert _vendor_check(copy, consumer, "--source", str(src)).returncode == 0
+    assert _vendor_check(src / "src", consumer).returncode == 1
+    assert _vendor_check(src / "src", consumer, "--source", str(src)).returncode == 1
+    # The checks above ran Python on the checkout's own src/; a byte-code cache written there
+    # would make the checkout dirty and refuse the next copy taken from it.
+    assert _git(src, "status", "--porcelain", "--untracked-files=all") == ""
+    assert _sync(_init(tmp_path / "another"), install_kit=True, source=src) == 0
+
+
+def test_a_package_that_shadows_the_copy_is_refused(tmp_path: Path) -> None:
+    # The consumer's PYTHONPATH is its own src/ first, then the copy's: a package of the same name
+    # there is what every check and the gate import, with the copy untouched behind it. One that
+    # is not edited says so; an edited one is seen by neither form, the limit vendor.py states.
+    src = _source(tmp_path)
+    consumer = _init(tmp_path / "consumer")
+    assert _sync(consumer, install_kit=True, source=src) == 0
+    shutil.copytree(src / "src/beethoven_qa", consumer / "src/beethoven_qa")
+    own = f"{consumer / 'src'}{os.pathsep}{consumer / VENDOR_DIR / 'src'}"
+    shadowed = _vendor_check(own, consumer)
+    assert shadowed.returncode == 1 and "shadows the copy" in shadowed.stdout
+    assert _vendor_check(consumer / VENDOR_DIR / "src", consumer).returncode == 0  # the copy's own
+    assert _check(consumer) == 0  # this process runs REPO's code, which is in neither place
+    assert _vendor_check(src / "src", consumer, "--source", str(src)).returncode == 0  # not seen
+
+
+def test_configuration_given_to_git_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Of what `git rev-parse --local-env-vars` lists, the two configuration carriers name no
+    # repository and stay: a container lane commonly gives safe.directory through GIT_CONFIG_COUNT,
+    # and without it every git call of vendor-check there would fail.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "vendor.counted")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "yes")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'vendor.dashc=yes'")
+    src = _source(tmp_path)
+    assert vendor._git(src, "config", "--get", "vendor.counted") == "yes\n"
+    assert vendor._git(src, "config", "--get", "vendor.dashc") == "yes\n"
+
+
+@pytest.mark.parametrize("given", ["dash-c", "counted"])
+def test_configuration_given_to_git_does_not_reach_the_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, given: str
+) -> None:
+    # The code keeps both carriers (the test above), and a push made as `git -c tag.gpgSign=true
+    # push` runs the pre-push hook, and so this suite, with that setting in GIT_CONFIG_PARAMETERS:
+    # before _env() dropped them, the release tag of every throwaway checkout became a signed one
+    # and `git tag v1.0.0` failed with exit 128 (measured 2026-10-04, git 2.43).
+    if given == "dash-c":
+        monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'tag.gpgSign=true'")
+    else:
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "tag.gpgSign")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+    src = _source(tmp_path)
+    assert _git(src, "cat-file", "-t", "v1.0.0") == "commit\n"  # lightweight, as written
+    consumer = _init(tmp_path / "consumer")
+    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _check(consumer) == 0
+
+
+def test_a_repository_named_in_the_environment_is_never_touched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A pre-push hook in a linked worktree runs with GIT_DIR=<main>/.git/worktrees/<name> in its
+    # environment, and pixi passes it on to the tests. Before the scrub, `git -C <tmp> init` here
+    # set core.bare=true in the developer's checkout, and `commit` and `tag v1.0.0` landed on their
+    # branch (measured 2026-10-04, git 2.43).
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+        assert name in _git_local_env()
+    developer = _init(tmp_path / "developer")
+    (developer / "work.txt").write_text("the developer's work\n", encoding="utf-8")
+    _git(developer, "add", "-A")
+    _git(developer, "commit", "-q", "-m", "stream work")
+    _git(developer, "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "stream-1")
+    monkeypatch.setenv("GIT_DIR", str(developer / ".git/worktrees/wt"))
+    # The premise: git itself, with that environment, acts on the worktree's branch whatever -C
+    # names (and, GIT_WORK_TREE being unset, takes that directory for its work tree).
+    named = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert named == "stream-1"
+
+    src = _source(tmp_path)
+    consumer = _init(tmp_path / "consumer")
+    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _check(consumer) == 0
+    _git(consumer, "add", "-A")
+    _git(consumer, "commit", "-q", "-m", "vendor v1.0.0")
+    # The printed cleanup line too, run through a shell as the person would: with GIT_DIR reaching
+    # it, its `git rm --cached` matched nothing in the developer's index, exited 0 and left the
+    # consumer's entry in place (measured 2026-10-04, in this file's own printed-line test).
+    _git(src, "rm", "-q", "src/beethoven_qa/example.py")
+    _git(src, "commit", "-q", "-m", "drop the example")
+    capsys.readouterr()
+    assert _sync(consumer, install_kit=True, source=src) == 1
+    done = _run_line(consumer, _printed_line(capsys.readouterr().out))
+    assert done.returncode == 0, done.stderr
+    assert _git(consumer, "ls-files", "--", f"{VENDOR_DIR}/src/beethoven_qa/example.py") == ""
+    assert _check(consumer) == 0
+    assert _git(developer, "log", "--format=%s", "stream-1") == "stream work\n"
+    assert _git(developer, "tag", "-l") == ""
+    assert _git(developer, "config", "core.bare") == "false\n"
+    assert _git(tmp_path / "wt", "status", "--porcelain") == ""
+
+
+def test_the_developers_git_configuration_does_not_reach_the_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # tag.gpgSign turns the lightweight release tag into a signed one with no message, and
+    # commit.gpgSign without a key fails every commit: 13 of 18 tests, for nothing in the code.
+    config = tmp_path / "gitconfig"
+    config.write_text("[tag]\n\tgpgSign = true\n[commit]\n\tgpgSign = true\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    src = _source(tmp_path)
+    assert _git(src, "tag", "-l") == "v1.0.0\n"
+    assert _git(src, "cat-file", "-t", "v1.0.0") == "commit\n"  # lightweight, as written
+
+
+@pytest.mark.parametrize("flag", ["--skip-worktree", "--assume-unchanged"])
+def test_an_edit_behind_an_index_flag_is_kept(tmp_path: Path, flag: str) -> None:
+    # The usual way to keep a local edit to a tracked file: git then reports the file unchanged,
+    # and the bytes on disk are not the commit's.
+    src = _source(tmp_path)
+    consumer = _init(tmp_path / "consumer")
+    assert _sync(consumer, install_kit=True, source=src) == 0
+    _git(consumer, "add", "-A")
+    _git(consumer, "commit", "-q", "-m", "vendor v1.0.0")
+    mine = "#!/bin/sh\necho MY UNCOMMITTED WORK\n"
+    kept = [KIT[0], f"{VENDOR_DIR}/pyproject.toml"]
+    for rel in kept:
+        _git(consumer, "update-index", flag, "--", rel)
+        (consumer / rel).write_text(mine, encoding="utf-8")
+    assert _git(consumer, "status", "--porcelain") == ""  # what git says of it
+    assert _sync(consumer, install_kit=True, source=src) == 2
+    for rel in kept:
+        assert (consumer / rel).read_text(encoding="utf-8") == mine
+
+
+def _forged_pyc(source: Path, flags: int) -> bytes:
+    # PEP 552's header (magic, flags, the genuine source's hash) over code the source never held.
+    code = compile("FORGED = True\n", str(source), "exec")
+    header = importlib.util.MAGIC_NUMBER + struct.pack("<I", flags)
+    return header + importlib.util.source_hash(source.read_bytes()) + marshal.dumps(code)
+
+
+def _forged(code: Path) -> bool:
+    # Reading a cache is unaffected by PYTHONDONTWRITEBYTECODE, so a forged one still loads.
+    out = subprocess.run(
+        [sys.executable, "-c", "import beethoven_qa.example as m; print(hasattr(m, 'FORGED'))"],
+        env=_env(PYTHONPATH=str(code)),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.strip() == "True"
+
+
+def test_a_byte_code_cache_that_carries_code_is_caught(tmp_path: Path) -> None:
+    src = _source(tmp_path)
+    consumer = _init(tmp_path / "consumer")
+    assert _sync(consumer, install_kit=True, source=src) == 0
+    _git(consumer, "add", "-A")
+    _git(consumer, "commit", "-q", "-m", "vendor v1.0.0")
+    code = consumer / VENDOR_DIR / "src"
+    example = code / "beethoven_qa/example.py"
+    pyc = Path(importlib.util.cache_from_source(str(example)))
+    rel = pyc.relative_to(consumer).as_posix()
+    # Python's own cache, a timestamp pyc, is not part of the copy.
+    py_compile.compile(str(example), cfile=str(pyc), doraise=True)
+    assert not _forged(code)
+    assert _check(consumer) == 0
+    # A hash-based pyc (unchecked, then checked) with the genuine source's hash: Python runs it in
+    # place of the source, and a fresh clone would too, so it is counted and the digest fails.
+    for flags in (0b01, 0b11):
+        pyc.write_bytes(_forged_pyc(example, flags))
+        assert _forged(code)
+        assert _check(consumer) == 1
+    # Once git tracks a cache it reaches every clone; refused by name whatever its kind.
+    _git(consumer, "add", "-f", "--", rel)
+    _git(consumer, "commit", "-q", "-m", "a cache")
+    assert _check(consumer) == 1
+    py_compile.compile(str(example), cfile=str(pyc), doraise=True)
+    assert _check(consumer) == 1
+    _git(consumer, "rm", "-q", "--cached", "--", rel)
+    assert _check(consumer) == 0
+
+
+def test_a_hook_git_records_without_the_executable_bit_is_caught(tmp_path: Path) -> None:
+    # A checkout whose file system git does not trust for modes (WSL on /mnt/c, NTFS) commits a
+    # new 0755 hook as 100644; every clone then has a hook git skips, and the live file and the
+    # copy's agree with each other, both without the bit.
+    src = _source(tmp_path)
+    consumer = _init(tmp_path / "consumer")
+    _git(consumer, "config", "core.fileMode", "false")
+    assert _sync(consumer, install_kit=True, source=src) == 0
+    _git(consumer, "add", "-A")
+    _git(consumer, "commit", "-q", "-m", "vendor v1.0.0")
+    assert _git(consumer, "ls-files", "-s", "--", KIT_EXECUTABLE[0]).startswith("100644 ")
+    assert os.access(consumer / KIT_EXECUTABLE[0], os.X_OK)  # this disk still says yes
+    assert _check(consumer) == 1
+    fresh = tmp_path / "fresh"
+    _git(tmp_path, "clone", "-q", str(consumer), str(fresh))
+    assert not os.access(fresh / KIT_EXECUTABLE[0], os.X_OK)  # what every clone gets
+    assert _check(fresh) == 1
+    hooks = [*KIT_EXECUTABLE, *(f"{VENDOR_DIR}/kit/{rel}" for rel in KIT_EXECUTABLE)]
+    _git(consumer, "update-index", "--chmod=+x", "--", *hooks)
+    assert _check(consumer) == 0
+
+
+def test_the_mode_is_set_on_the_open_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # glibc before 2.32 refuses fchmodat(AT_SYMLINK_NOFOLLOW) with ENOTSUP, which CPython raises as
+    # NotImplementedError, not an OSError: a path-based chmod stopped vendor after its first file,
+    # with a traceback and exit 1, the code for "files dropped".
+    src = _source(tmp_path)
+    consumer = _init(tmp_path / "consumer")
+
+    def unsupported(*args: object, **kwargs: object) -> None:
+        raise NotImplementedError("chmod: follow_symlinks unavailable on this platform")
+
+    monkeypatch.setattr(os, "chmod", unsupported)
+    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert (consumer / KIT_EXECUTABLE[0]).stat().st_mode & 0o777 == 0o755
+    assert (consumer / VENDOR_DIR / "pyproject.toml").stat().st_mode & 0o777 == 0o644
+    monkeypatch.setattr(os, "fchmod", unsupported)
+    assert _sync(consumer, install_kit=True, source=src) == 3
 
 
 def test_refusals(tmp_path: Path) -> None:
