@@ -8,8 +8,15 @@ honest is its record: ``vendor/beethoven-qa/ORIGIN`` names the repository, the r
 commit it was taken from and the sha256 of the copied tree, and ``vendor-check`` recomputes that
 digest in the consumer's CI, so an edit to the copy or a kit file that leaves ORIGIN alone (drift,
 a formatter, a hand fix) fails. It is a check in the consumer, not a proof: an edit that also
-rewrites ORIGIN passes it. ``vendor-check --source <beethoven-qa checkout>`` closes that gap where
-both checkouts are present, by rebuilding the digest from the commit ORIGIN names.
+rewrites ORIGIN passes it, and so does an edit to the copy's own vendor.py, since the consumer's
+``vendor-check`` is the copy's code checking itself. ``vendor-check --source <beethoven-qa
+checkout>`` closes that gap where both checkouts are present, by rebuilding the digest from the
+commit ORIGIN names; it is run from that checkout's own environment, never the consumer's. An
+unedited copy refuses to run it from anywhere else; an edited one would not, which is exactly why
+the line runs from beethoven-qa's own environment. A package of the same name ahead of the copy on
+the consumer's PYTHONPATH shadows it for every check and for the gate: an unedited one refuses the
+plain check (its code is in the consumer and not in the copy), an edited one is seen by neither
+form, and a reviewer who sees ``src/beethoven_qa/`` in a consumer asks why.
 
 Two commands, both run through ``python -m beethoven_qa``:
 
@@ -19,18 +26,24 @@ Two commands, both run through ``python -m beethoven_qa``:
   read from the commit's own objects, never from the working tree. With ``--kit`` it also puts the
   kit files in place in the consumer. Before it writes anything it refuses a link anywhere on a
   path it would write, a file in the way of a directory, and any existing file it would replace
-  that is not committed and unchanged (except a copy that still matches its ORIGIN). It never
-  deletes: a file the new release no longer has is listed with a line for the person to run in a
-  reviewed commit, and vendor-check fails until they have.
+  whose bytes are not the ones HEAD holds for it (compared with the commit's blob, not with the
+  index, so neither an ignore rule nor an index flag can hide an edit; a copy that still matches
+  its ORIGIN is the exception). It never deletes: a file the new release no longer has is listed
+  with a line for the person to run in a reviewed commit, and vendor-check fails until they have.
 - ``vendor-check`` runs in the consumer (its CI and its gate) and fails on any difference between
-  the copy and its ORIGIN, or between the live kit files and the copy's.
+  the copy and its ORIGIN, or between the live kit files and the copy's; on a byte-code cache that
+  git tracks in the copy, or a hash-based one there (Python loads either in place of the source);
+  and on a kit hook that git records without its executable bit, which git would skip.
 
-The functions that carry contracts are pure; the ones that read, write and run git are private and
-carry none, so the CrossHair gate never runs them with symbolic arguments.
+The functions that carry contracts are pure; the ones that read, write and run git are private,
+carry none, and are called by no contracted function. Both halves matter: the gate names only
+contracted functions as targets, and CrossHair runs whatever a target calls, so an I/O helper a
+contracted function called would be run with symbolic arguments after all.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import re
@@ -46,6 +59,7 @@ from beethoven_qa.contracts import ensure, require
 __all__ = [
     "COPY_ROOTS",
     "KIT",
+    "KIT_EXECUTABLE",
     "ORIGIN_NAME",
     "REPOSITORY",
     "VENDOR_DIR",
@@ -71,6 +85,9 @@ KIT: tuple[str, ...] = (
     ".github/workflows/rulesets.yml",
     ".claude/hooks/session-start.sh",
 )
+# The kit files git runs, so they must be executable: git skips a hook that is not, with only a
+# hint. ORIGIN records no modes, so this is what the plain vendor-check knows of the release's.
+KIT_EXECUTABLE: tuple[str, ...] = (".githooks/pre-push", ".claude/hooks/session-start.sh")
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _HEX40 = re.compile(r"[0-9a-f]{40}")
@@ -177,7 +194,7 @@ class Origin(BaseModel):
         return cls.model_validate(fields)
 
 
-# --- I/O: private, uncontracted, never run symbolically -------------------------------------------
+# --- I/O: private, uncontracted, never a gate target, called by no contracted function ------------
 
 # The modes a copied file may have at the commit: a regular file, executable or not. A link (120000)
 # or a submodule (160000) is refused; a copy holds files only.
@@ -192,13 +209,53 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _git(cwd: Path, *args: str) -> str:
-    out = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
+# Of the variables git lists as local to a repository, the two that carry configuration rather
+# than name a repository: `git -c key=value` travels as GIT_CONFIG_PARAMETERS, and GIT_CONFIG_COUNT
+# with its GIT_CONFIG_KEY_<n> and GIT_CONFIG_VALUE_<n> pairs is how a container lane commonly
+# gives safe.directory. Both stay: they name no repository, and a lane that needs safe.directory
+# that way would otherwise fail every git call here.
+_GIT_CONFIG_ENV = frozenset({"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"})
+
+
+@functools.cache
+def _git_local_env() -> frozenset[str]:
+    # The variables git treats as local to one repository (`git rev-parse --local-env-vars`:
+    # GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR and the rest, the configuration
+    # carriers above among them), asked of the git in use rather than kept as a list a newer git
+    # could outgrow. The listing needs no repository.
+    out = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"], check=True, capture_output=True, text=True
+    )
+    return frozenset(out.stdout.split())
+
+
+def _git_env() -> dict[str, str]:
+    # A hook runs with GIT_DIR in its environment (a linked worktree's pre-push hook with an
+    # absolute one), and git honours it over -C: in such a hook `git -C <tmp> init` set
+    # core.bare=true in the developer's own checkout, and `commit` and `tag` landed on their branch
+    # (measured 2026-10-04, git 2.43). Without the variables that name a repository each call acts
+    # on the checkout it names and no other; configuration given on the command line or through
+    # the environment names none and is kept.
+    dropped = _git_local_env() - _GIT_CONFIG_ENV
+    return {key: value for key, value in os.environ.items() if key not in dropped}
+
+
+def _git(cwd: Path, *args: str, stdin: str | None = None) -> str:
+    out = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_git_env(),
+        input=stdin,
+    )
     return out.stdout
 
 
 def _git_bytes(cwd: Path, *args: str) -> bytes:
-    return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True).stdout
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], check=True, capture_output=True, env=_git_env()
+    ).stdout
 
 
 def _toplevel(path: Path) -> Path | None:
@@ -208,11 +265,26 @@ def _toplevel(path: Path) -> Path | None:
         return None
 
 
+def _hash_based_pyc(path: Path) -> bool:
+    # PEP 552: bytes 4 to 8 of a .pyc are its flags, little-endian, and bit 0 set means hash-based.
+    # Importing writes only timestamp pycs, so a hash-based one was compiled on purpose; and Python
+    # loads one as it stands (unchecked) or after comparing the hash of the source alone (checked),
+    # so either carries whatever code it was given and survives a fresh clone, where a timestamp
+    # pyc is recompiled (measured 2026-10-04, Python 3.11). Unreadable counts, like anything else.
+    try:
+        with path.open("rb") as fh:
+            header = fh.read(8)
+    except OSError:
+        return True
+    return len(header) == 8 and bool(int.from_bytes(header[4:8], "little") & 0b01)
+
+
 def _walk(root: Path) -> tuple[dict[str, Path], list[str]]:
     # Every regular file under root, by its path relative to root, and every link found (a copy
-    # written by `vendor` never holds one). Python's byte-code caches (.pyc files directly inside a
-    # __pycache__ directory) are not part of a copy: importing the vendored package creates them.
-    # Anything else in a __pycache__ directory is counted, so the cache cannot hide content.
+    # written by `vendor` never holds one). Python's own byte-code caches (timestamp .pyc files
+    # directly inside a __pycache__ directory) are not part of a copy: importing the vendored
+    # package creates them. Anything else in a __pycache__ directory, a hash-based pyc included,
+    # is counted, so the cache cannot hide content.
     found: dict[str, Path] = {}
     links: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -222,7 +294,10 @@ def _walk(root: Path) -> tuple[dict[str, Path], list[str]]:
                 links.append(full.relative_to(root).as_posix())
         for name in filenames:
             full = Path(dirpath) / name
-            if full.is_symlink() or (Path(dirpath).name == "__pycache__" and name.endswith(".pyc")):
+            if full.is_symlink():
+                continue
+            cache = Path(dirpath).name == "__pycache__" and name.endswith(".pyc")
+            if cache and not _hash_based_pyc(full):
                 continue
             found[full.relative_to(root).as_posix()] = full
     return found, sorted(links)
@@ -283,26 +358,48 @@ def _blocked(base: Path, rel: str, directory: bool = False) -> str | None:
 
 
 def _committed(into: Path, paths: list[str]) -> set[str]:
-    # The paths (relative to ``into``) that git tracks and that are unchanged from HEAD. Asked of
-    # git directly, file by file, so neither .gitignore nor status.showUntrackedFiles can hide one.
+    # The paths (relative to ``into``) that git tracks and whose bytes on disk are the ones HEAD
+    # holds. Asked of git directly, file by file, so neither .gitignore nor
+    # status.showUntrackedFiles can hide one; and compared with HEAD's own blob (hashed through the
+    # filters `git add` would apply), never with the index, because `git diff` and `git status`
+    # take an entry marked --assume-unchanged or --skip-worktree at its word and would report an
+    # edit behind it as no change.
     if not paths:
         return set()
-    tracked = set(_git(into, "--literal-pathspecs", "ls-files", "-z", "--", *paths).split("\x00"))
+    tracked = sorted(
+        set(_git(into, "--literal-pathspecs", "ls-files", "-z", "--", *paths).split("\x00")) - {""}
+    )
+    tracked = [rel for rel in tracked if "\n" not in rel]  # one path per line below
     try:
         _git(into, "rev-parse", "--verify", "--quiet", "HEAD")
     except subprocess.CalledProcessError:
         return set()  # nothing is committed yet
-    changed = _git(into, "--literal-pathspecs", "diff", "--name-only", "-z", "HEAD", "--", *paths)
-    return (tracked - {""}) - set(changed.split("\x00"))
+    if not tracked:
+        return set()
+    on_disk = _git(into, "hash-object", "--stdin-paths", stdin="".join(f"{p}\n" for p in tracked))
+    in_head = _git(
+        into,
+        "cat-file",
+        "--batch-check=%(objectname)",
+        stdin="".join(f"HEAD:{p}\n" for p in tracked),
+    )
+    return {
+        rel
+        for rel, disk, head in zip(tracked, on_disk.splitlines(), in_head.splitlines(), strict=True)
+        if disk == head
+    }
 
 
 def _write(path: Path, data: bytes, mode: int) -> None:
-    # O_NOFOLLOW: a link that appeared after the checks is refused here rather than followed.
+    # O_NOFOLLOW: a link that appeared after the checks is refused here rather than followed. The
+    # mode is set on that same descriptor: a path-based chmod with follow_symlinks=False is
+    # fchmodat(AT_SYMLINK_NOFOLLOW), which glibc before 2.32 (RHEL 8, the grid's CentOS 7) refuses
+    # with ENOTSUP and CPython reports as NotImplementedError, after the first file was written.
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode)
     with os.fdopen(fd, "wb") as fh:
+        os.fchmod(fd, mode)
         fh.write(data)
-    os.chmod(path, mode, follow_symlinks=False)
 
 
 def _sync(into: Path, install_kit: bool, source: Path | None = None) -> int:
@@ -360,7 +457,8 @@ def _sync(into: Path, install_kit: bool, source: Path | None = None) -> int:
             _write(into / rel, data, mode)
         if kit:
             print(f"vendor: kit files in place in {into}: {', '.join(KIT)}")
-    except OSError as exc:
+    except (OSError, NotImplementedError) as exc:
+        # NotImplementedError is CPython's word for a file-system call the platform lacks.
         print(f"vendor: stopped part way ({exc}); `git status` shows what was written")
         return 3
 
@@ -457,12 +555,53 @@ def _pristine(dest: Path) -> bool:
     return _measure(dest) == (origin.tree_sha256, origin.files)
 
 
+def _index_modes(root: Path, paths: list[str]) -> dict[str, str]:
+    # The mode git's index records for each of the paths it tracks (`ls-files -s`: mode, object,
+    # stage, a tab, the path).
+    listing = _git(root, "--literal-pathspecs", "ls-files", "-s", "-z", "--", *paths)
+    modes: dict[str, str] = {}
+    for item in listing.split("\x00"):
+        if item:
+            meta, _, path = item.partition("\t")
+            modes[path] = meta.split(" ")[0]
+    return modes
+
+
 def _check(root: Path, source: Path | None = None) -> int:
+    if source is not None:
+        # The anchored check is only as good as the code running it, and the consumer's own
+        # environment imports the copy: a copy whose vendor.py was edited to vouch for itself, with
+        # ORIGIN untouched, would pass. So this form is run from the source checkout's own
+        # environment (docs/CONSUMING.md), and an unedited copy refuses to run it from anywhere
+        # else; an edited one would not, which is why the documented line never runs it here.
+        source = source.resolve()
+        if source != _source_root():
+            print(
+                f"vendor-check: --source {source} is not the checkout this command runs from "
+                f"({_source_root()}); run the anchored check from that checkout's own environment, "
+                "since a copy cannot vouch for itself"
+            )
+            return 1
     root = root.resolve()
+    if _toplevel(root) != root:
+        print(f"vendor-check: {root} is not the root of a git checkout")
+        return 1
     dest = root / VENDOR_DIR
     reason = _blocked(root, VENDOR_DIR, directory=True)
     if reason is not None or not dest.is_dir():
         print(f"vendor-check: no copy at {VENDOR_DIR} in {root}{f' ({reason})' if reason else ''}")
+        return 1
+    # The plain check is the copy's own code, imported through the consumer's PYTHONPATH, and a
+    # package of the same name in the consumer's own src/ comes first on that path: it would check
+    # the copy in the copy's place, and the gate would run it too. An unedited one says so here;
+    # an edited one is the limit the docstring states, the same as an edited copy.
+    code = Path(__file__).resolve()
+    if _toplevel(code.parent) == root and not code.is_relative_to(dest):
+        print(
+            f"vendor-check: this check is running {code}, which is in {root} but is not its copy: "
+            f"a package named beethoven_qa ahead of {VENDOR_DIR}/src on the PYTHONPATH shadows the "
+            "copy, for the gate too; remove it, or ask why it is there"
+        )
         return 1
     try:
         origin = _read_origin(dest)
@@ -491,8 +630,33 @@ def _check(root: Path, source: Path | None = None) -> int:
         elif os.access(live, os.X_OK) != os.access(kept, os.X_OK):
             # git skips a hook that is not executable, without a word: the gate would not run.
             failures.append(f"kit file {rel} is executable in one place and not the other")
+    # What git records is what every clone gets, whatever this disk says: a checkout with
+    # core.fileMode=false (WSL on /mnt/c, NTFS) commits a new 0755 hook as 100644, and the two
+    # files above then agree with each other on every clone, both without the bit.
+    hooks = [*KIT_EXECUTABLE, *(f"{VENDOR_DIR}/kit/{rel}" for rel in KIT_EXECUTABLE)]
+    recorded = _index_modes(root, hooks)
+    unset = [rel for rel in hooks if rel in recorded and recorded[rel] != "100755"]
+    if unset:
+        paths = " ".join(shlex.quote(rel) for rel in unset)
+        failures.append(
+            "git records these without the executable bit, so every clone gets a hook git skips "
+            "(core.fileMode=false does that); fix the record: "
+            f"git update-index --chmod=+x -- {paths}"
+        )
+    # A byte-code cache git tracks reaches every clone, and Python can load it in place of the
+    # source (a hash-based one without looking at the source); the digest above leaves Python's
+    # own timestamp caches out, so a tracked one is refused by name.
+    tracked = _git(root, "--literal-pathspecs", "ls-files", "-z", "--", VENDOR_DIR).split("\x00")
+    caches = sorted(rel for rel in tracked if "__pycache__" in rel.split("/"))
+    if caches:
+        paths = " ".join(shlex.quote(rel) for rel in caches)
+        failures.append(
+            "git tracks byte-code caches in the copy, which Python can load in place of the "
+            f"source; remove them in a reviewed commit: rm -- {paths} && "
+            f"git rm -q --cached -- {paths}"
+        )
     if source is not None:
-        failures += _against(source.resolve(), dest, origin)
+        failures += _against(source, dest, origin)
     for failure in failures:
         print(f"vendor-check: {failure}")
     if not failures:

@@ -50,7 +50,9 @@ Anthropic's marks, used here to say what it runs.
 ```
 
 The kit files are byte for byte the release's; `vendor-check` fails one that differs. A change to
-one is made in beethoven-qa and arrives with the next release.
+one is made in beethoven-qa and arrives with the next release: a consumer that takes that release
+with `--kit` has the new file in the same commit as the new copy, and one that takes it without
+`--kit` keeps its old kit and fails `vendor-check` until it does, by design.
 
 ## 1. Take the copy from a clean, tagged checkout
 
@@ -95,11 +97,14 @@ pixi run --locked --manifest-path ../beethoven-qa/pixi.toml python -m beethoven_
   the root of a git checkout, or is beethoven-qa itself; a link anywhere on a path it would write
   (`vendor/`, `vendor/beethoven-qa/`, `ORIGIN`, any file of the copy, `.github/`, `.claude/`, a kit
   file); a file where the release has a directory, or the reverse; an existing copy that holds a
-  link; a link or a submodule in the release itself; and any existing file it would replace that git
-  does not track as committed and unchanged, asked of git file by file, so a `.gitignore` entry or
-  `status.showUntrackedFiles=no` cannot hide one. A copy that still matches its ORIGIN, and kit
-  files equal to that copy's, are rewritten even uncommitted, since nothing in them is lost: taking
-  another tag before the first commit just works.
+  link; a link or a submodule in the release itself; and any existing file it would replace whose
+  bytes are not the ones HEAD holds for it, asked of git file by file and compared with the
+  commit's own blob rather than with the index, so neither a `.gitignore` entry nor
+  `status.showUntrackedFiles=no` nor an edit kept behind `git update-index --assume-unchanged` or
+  `--skip-worktree` (which `git status` and `git diff` report as no change) can hide one. A copy
+  that still matches its ORIGIN, and kit files equal to that copy's, are rewritten even
+  uncommitted, since nothing in them is lost: taking another tag before the first commit just
+  works.
 - **It never deletes.** A file the old copy had and the new release does not is left in place and
   listed with one line for the person to run,
   `rm -- <files> && git rm -q --cached --ignore-unmatch -- <files>`, which works whether or not the
@@ -176,6 +181,14 @@ pixi run hooks                      # the pre-push gate is on from here
 pixi run --locked gate
 ```
 
+The hook gates the commit being pushed, not whatever is checked out: every ref it is given must
+be the checkout's HEAD and `git status --porcelain` must print nothing (untracked files count), or
+it refuses and says to check out and commit what is pushed, or to push knowingly with
+`SKIP_GATE=1`; and before the gate runs it unsets the variables git exports to a hook (`GIT_DIR`
+among them), so a push from a linked worktree never aims the tests' throwaway repositories at the
+repository itself. A file Claude Code writes beside the checkout, such as
+`.claude/settings.local.json`, is listed in `.gitignore` so it never counts as untracked.
+
 From then on the lock changes only on purpose, by pixi, in a change that says so; never by hand,
 never by a stray `pixi install` or `pixi update`, and every `pixi run` carries `--locked` (without
 it pixi re-solves a manifest that drifted from its lock, without a word). Measured 2026-10-04: this manifest in a throwaway
@@ -202,7 +215,13 @@ in the table below under `unproven` with its reason, never marked with a `# cros
 (the gate refuses every directive: a comment hides what is not proven, a table entry says so on
 every run). The function keeps its contracts, which the tests check at run time; the logic it needs
 lives in contracted functions CrossHair proves. An entry that names no contracted function fails
-the gate, so a renamed or removed function cannot leave an entry behind.
+the gate, so a renamed or removed function cannot leave an entry behind; so does one that names a
+class or a method, since a class is proven whole, as one target, and I/O stays out of contracted
+classes. Listing keeps the gate from checking the function as a target, and nothing more: CrossHair
+runs the body of every function a contracted target calls, listed or not, so a contracted function
+that calls a listed one does the I/O too while it is being proven and is itself kept private,
+exempt or listed; and a listed function's contracts are assumed by every proven caller, never
+checked through it, so the tests are their only check and must exercise them.
 
 ## 3. `pyproject.toml`: the gate's table and the tools
 
@@ -237,7 +256,7 @@ src = "src"                         # its directory, inside the repository
 exempt = ["<package>.__main__"]     # wiring and the command line only, never logic
 per_condition_timeout = 20          # seconds per condition, 1 to 600: the declared bound
 
-# Functions CrossHair never runs, each with its reason; the gate prints them on every run.
+# Functions the gate never checks as targets, each with its reason; it prints them on every run.
 [tool.beethoven-qa.unproven]
 "<package>.store.load" = "reads the account list from disk"
 ```
@@ -245,8 +264,9 @@ per_condition_timeout = 20          # seconds per condition, 1 to 600: the decla
 The table is read and validated once (`GateConfig` in `src/beethoven_qa/gate.py`): a repository
 without it is a configuration error; `package` is one top-level name, no dots; `src` is a directory
 inside the repository; every `exempt` entry is the package or one of its modules, so the copy can
-never be exempted from a consumer's gate; every `unproven` key is a function of the package and
-every reason says something; no other key is accepted. The gate imports every module
+never be exempted from a consumer's gate; every `unproven` key is a function of the package (never
+a class or a method; the gate refuses an entry that names one) and every reason says something; no
+other key is accepted. The gate imports every module
 of the package to find its functions, so a module that does work at import time does it during the
 gate, and one that calls `sys.exit` at import fails it: guard a command line's call with
 `if __name__ == "__main__":`.
@@ -503,8 +523,13 @@ dialog, which a cloud session never shows; no thread has tried it.
    `/plugin marketplace update beethoven-qa` or `claude plugin update beethoven-qa@beethoven-qa`.
 2. **In the consumer**, on a branch: step 1 again with the new tag. Exit 1 means the release dropped
    files; run the printed line. Then `pixi run --locked vendor-check` and `pixi run --locked gate`,
-   and, with the beethoven-qa checkout beside it,
-   `pixi run --locked python -m beethoven_qa vendor-check --source ../beethoven-qa`.
+   and, with the beethoven-qa checkout beside it, the anchored check from that checkout's own
+   environment, the way step 1 runs `vendor`:
+   `pixi run --locked --manifest-path ../beethoven-qa/pixi.toml python -m beethoven_qa vendor-check --root . --source ../beethoven-qa`.
+   Run from the consumer's environment instead, `--source` is refused with exit 1: that
+   environment imports the copy, so the check would be the copy's own code vouching for itself.
+   An unedited copy refuses; an edited one would not, which is exactly why the line runs from
+   beethoven-qa's own environment.
 3. If the release changed the dependency lines of beethoven-qa's `pixi.toml`, make the same change
    in the consumer's, run `pixi lock` on purpose, and say so in the same change.
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
@@ -514,21 +539,42 @@ dialog, which a cloud session never shows; no thread has tried it.
 
 ## What is never done
 
-- **Hand-editing the copy** or a kit file. `vendor-check` fails both (measured 2026-10-04: one added
-  line in the copy, and one in `.githooks/pre-push`, each failed it), and a kit hook that lost its
-  executable bit. It is a check in the consumer, not a proof: an edit that also rewrites `ORIGIN`
-  passes it, and only `vendor-check --source <beethoven-qa checkout>`, which rebuilds the tree from
-  the commit ORIGIN names and checks the tag, catches that (measured the same day, in
-  `tests/test_vendor.py`). A reviewer who sees ORIGIN change in a pull request that takes no new
-  release asks why. A change is made in beethoven-qa, released, and taken with step 1. `/beethoven-qa:gate-until-green` leaves the copy
-  alone and says so, and the stream agent never edits it.
+- **Hand-editing the copy** or a kit file. `vendor-check`, run at the consumer's root (it asks git
+  there, and tells git which repository by the directory alone: `GIT_DIR` and its kin from a
+  hook's environment are dropped, configuration given with `git -c` or `GIT_CONFIG_COUNT`, the
+  way a container lane gives `safe.directory`, is kept), fails both (measured 2026-10-04: one
+  added line in the copy, and one in `.githooks/pre-push`, each failed it); a kit hook that lost
+  its executable bit on disk, and one
+  that git records without it (`.githooks/pre-push` and `.claude/hooks/session-start.sh` must be
+  `100755` in git's own index, live and under `kit/`: a checkout with `core.fileMode=false`, such
+  as WSL on `/mnt/c`, commits a new hook as `100644`, every clone then has a hook git skips with
+  only a hint, and the printed `git update-index --chmod=+x` line fixes the record); a byte-code
+  cache git tracks anywhere under the copy, and a hash-based `.pyc` there even untracked (Python
+  loads one in place of the source, after comparing only the source's hash or not at all, so one
+  compiled from other code survives a fresh clone and runs; the timestamp caches importing writes
+  are left out of the digest and are recompiled on a clone). It is a check in the consumer, not a
+  proof: an edit that also rewrites `ORIGIN` passes it, and so does an edit to the copy's own
+  `vendor.py`, since the consumer's environment runs the copy's code. Only
+  `vendor-check --source <beethoven-qa checkout>`, which rebuilds the tree from the commit ORIGIN
+  names and checks the tag, catches those, and it is run from that checkout's own environment
+  (the line under "Updating", step 2): an unedited copy refuses to run it from anywhere else, and
+  an edited one would not, which is exactly why the line runs from beethoven-qa's own environment
+  (measured the same day, in `tests/test_vendor.py`). A package named `beethoven_qa` in the
+  consumer's own `src/` comes first on the `PYTHONPATH` and shadows the copy for `vendor-check`
+  and the gate alike: an unedited one fails the plain check (its code is in the consumer and not
+  in the copy), an edited one is seen by neither form, and a reviewer who sees `src/beethoven_qa/`
+  in a consumer asks why. A reviewer who sees ORIGIN change in a pull request that takes no new
+  release asks why. A change is made in beethoven-qa, released, and taken with step 1.
+  `/beethoven-qa:gate-until-green` leaves the copy alone and says so, and the stream agent never
+  edits it.
 - **Linting or type-checking the copy as the consumer's code.** `lint` names `src tests`, ruff
   excludes `vendor`, `typecheck` names `src`, the typeguard hook names the consumer's package, and
   `exempt` cannot name the copy. The copy is held to all of these by beethoven-qa's own gate, which
   a commit clears before it reaches `main` and a tag.
 - **Skipping `vendor-check`.** It is a lane of `pixi run --locked gate` and a step of the CI gate lane.
-  `SKIP_GATE=1` skips the pre-push gate only knowingly, with the reason in the commit, and CI runs
-  every lane regardless.
+  `SKIP_GATE=1` skips the pre-push gate only knowingly, with the reason in the commit; it also skips
+  the hook's own checks (that the pushed ref is HEAD and the tree clean), so such a push is unproven
+  on every count, and CI runs every lane regardless.
 - **Taking a copy from a dirty, untagged or vendored checkout**, or running `pixi update` or a plain
   `pixi install` to change a lock.
 - **Skipping, disabling or weakening a test, a contract or a symbolic bound to get green**,

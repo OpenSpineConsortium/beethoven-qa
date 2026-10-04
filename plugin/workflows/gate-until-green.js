@@ -77,9 +77,11 @@ const NEVER =
   'excludes: name the callers you checked. When the only fix is one of these moves, do not make it: leave that ' +
   "failure, say which move it would take in needs_person, and fix the rest; it is a person's decision."
 
-// Files a fix may not change on its own, whatever its note says: the configuration the gate reads,
-// the lock, the pinned copy, and the CI, ruleset and hook files. Checked on the fixer's own list,
-// so a fix that touched one is gated once more and then stopped for a person.
+// Files a fix may not change on its own, whatever its note says: the configuration the gate reads
+// (pytest's own files among them, which it reads before pyproject.toml, and any conftest.py, which
+// can deselect or reconfigure tests from a hook), the lock, the pinned copy, and the CI, ruleset
+// and hook files. Checked on the fixer's own list, so a fix that touched one is gated once more and
+// then stopped for a person.
 function personsFiles(files) {
   return files.filter((f) => {
     const p = String(f)
@@ -87,7 +89,7 @@ function personsFiles(files) {
       .replace(/^.*\/\.claude\/worktrees\/[^/]+\//, '')
       .replace(/^\.\//, '')
     return (
-      /(^|\/)(pyproject\.toml|pixi\.toml|pixi\.lock|ruff\.toml|\.ruff\.toml|mypy\.ini|\.mypy\.ini|setup\.cfg|tox\.ini)$/.test(p) ||
+      /(^|\/)(pyproject\.toml|pixi\.toml|pixi\.lock|ruff\.toml|\.ruff\.toml|mypy\.ini|\.mypy\.ini|pytest\.ini|\.pytest\.ini|setup\.cfg|tox\.ini|conftest\.py)$/.test(p) ||
       /(^|\/)(vendor\/beethoven-qa|\.github|\.githooks)\//.test(p) ||
       /(^|\/)\.claude\/(?!worktrees\/)/.test(p)
     )

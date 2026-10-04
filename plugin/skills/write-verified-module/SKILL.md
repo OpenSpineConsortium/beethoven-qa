@@ -63,7 +63,10 @@ proof; they pin what a reader expects and catch a contract weakened by mistake.
 
 The smallest code that satisfies the contracts. `@beartype` outermost, the contracts beneath it,
 imported from `beethoven_qa.contracts`. No file, clock, subprocess, import or network inside a
-contracted function: CrossHair runs it with symbolic arguments. Prefer a loop over the items of an
+contracted function, nor through anything it calls: CrossHair runs it with symbolic arguments, and
+runs the body of every function it calls, a function listed under `[tool.beethoven-qa.unproven]`
+included (listing only keeps a function from being a target of its own; its contracts are then
+assumed by every proven caller and checked by the tests alone). Prefer a loop over the items of an
 argument or to a constant; a loop to a symbolic count rarely comes back confirmed.
 
 ## 4. The gate

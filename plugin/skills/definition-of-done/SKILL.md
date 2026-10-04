@@ -69,9 +69,15 @@ meaningful unit.
   module listed in `exempt`: wiring and the command line only, never logic. Pass in what the edge
   read: the caller reads the clock, the function takes `now`. A public function that must do the
   I/O itself (a loader the command line and the tests both call) keeps its contracts and is named,
-  with its reason, under `[tool.beethoven-qa.unproven]`; the gate never runs it, prints it on every
-  run, and fails on an entry that names no contracted function. Logic CrossHair measurably cannot
-  run goes there too, its reason naming the fault; logic it can run, never.
+  with its reason, under `[tool.beethoven-qa.unproven]`; the gate never checks it as a target,
+  prints it on every run, and fails on an entry that names no contracted function, a class or a
+  method (a class is proven whole, as one target, so I/O stays out of a contracted class). Logic
+  CrossHair measurably cannot run goes there too, its reason naming the fault; logic it can run,
+  never. Listing does nothing more: CrossHair runs the body of every function a contracted target
+  calls, listed or not, so a contracted function that calls a listed one does the I/O too while it
+  is being proven and is itself kept private, exempt or listed; and a listed function's contracts
+  are assumed by every proven caller, never checked through it, so the tests are their only check
+  and must exercise them.
 - **Bounded loops.** A loop whose count is a symbolic integer multiplies the paths: measured, a
   `for i in range(n)` sum came back "Not confirmed". Prefer a closed form, a loop over the items of
   an argument, or a constant bound.

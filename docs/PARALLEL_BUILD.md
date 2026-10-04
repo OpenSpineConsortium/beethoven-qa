@@ -75,9 +75,22 @@ takes only the keys `agent` and `subagentStatusLine` and drops every other (plug
 - A worktree is a fresh checkout: `.pixi/` is not there. `pixi install --locked` first (the pixi
   cache is shared across worktrees, so it is minutes, not a new solve); `pixi run --locked gate`
   then works in the worktree, and so does the pre-push gate, because `core.hooksPath` is repository
-  configuration shared through the one `.git` directory. Every task runs as `pixi run --locked
-  <task>`: a plain `pixi run` re-solves a manifest that drifted from its lock and rewrites
-  `pixi.lock` without a word.
+  configuration shared through the one `.git` directory. Git hands a hook run from a linked
+  worktree the path of that worktree's own git directory in `GIT_DIR`, and a git that inherits it
+  acts on the main repository whatever `-C` names; the hook unsets it, with the rest of
+  `git rev-parse --local-env-vars`, before the gate runs, so the throwaway repositories the tests
+  make are their own (measured 2026-10-04, git 2.43: without that, the vendor tests' commit and
+  `v1.0.0` tag landed on the worktree's branch and in the repository). The vendor tests and
+  `vendor.py` scrub the same variables themselves for every process they start (git, the printed
+  cleanup line through a shell, the Python helpers), so the gate's own tests were safe in a
+  worktree hook even without the unset, which stays as the belt (measured the same day: a push
+  from a worktree whose hook ran only `tests/test_vendor.py`, unsetting nothing, was accepted and
+  left the main checkout untouched). The hook gates the commit
+  that is pushed, not whatever is checked out: every ref it is given must be the worktree's HEAD
+  and `git status --porcelain` must print nothing (untracked files count), or the push is refused
+  and the message says so; `SKIP_GATE=1` pushes knowingly (`tests/test_hooks.py` pins both).
+  Every task runs as `pixi run --locked <task>`: a plain `pixi run` re-solves a manifest that
+  drifted from its lock and rewrites `pixi.lock` without a word.
 - In a consuming repository the pinned copy is tracked, so every worktree has it and every stream's
   gate is the same pinned gate. A stream never edits `vendor/beethoven-qa/`; `vendor-check` fails a
   copy edited by hand.
@@ -136,10 +149,18 @@ the branching and the intermediate results, so the conversation holds only the f
   calls from cache. A script with `import()` fails before it starts. Claude Code refuses to save
   through a symlinked `.claude`, `.claude/workflows` or target file. `node tools/check_workflows.mjs`
   checks the plugin's scripts against these rules without running an agent: the meta is read as a
-  pure literal (no spread, computed key, method, call or name standing for a value) with a non-empty
-  `name` and `description`; `Date` may appear only as `new Date(<arguments>)` and `Math` only as
-  `Math.<name>` other than `random`, whatever the spacing, brackets or optional chaining; no
-  `import(`; and the body parses.
+  pure literal (no spread, computed key, method, call or name standing for a value, and no
+  `__proto__`, `constructor` or `prototype` key) with a non-empty `name` and `description`, and
+  nothing but a `;`, a line break and a new statement, or the end of the text may follow it;
+  `Date` may appear only as `new Date(<arguments>)` (an empty parenthesis, a comment or a spread
+  inside it is no argument) and `Math` only as `Math.<name>` other than `random`, whatever the
+  spacing, brackets or optional chaining, and every `\u` escape is refused so an escaped spelling
+  cannot hide one; no `import(`, `import.meta`, `require(` or `new.target`; and the whole, wrapped
+  as the runtime wraps it, parses under both grammars the runtime uses (it reads the meta as a
+  module and runs the body as a strict-mode script).
+  `node --test tools/check_workflows.test.mjs` runs the checker against scripts it must refuse and
+  accept, and the three workflow scripts under stand-in hooks, so each stops where its comments
+  say it stops; CI runs both.
 - **In a cloud project thread** the plugin is not installed (a cloud session does not add a
   repository's marketplaces; `docs/CONSUMING.md` step 7). Run a workflow there with the Workflow
   tool's `scriptPath` set to its script, `plugin/workflows/<name>.js` in this checkout or
@@ -149,18 +170,23 @@ the branching and the intermediate results, so the conversation holds only the f
   before it reports, so its failures are never those of the code before the last edit. It stops
   when green, when the fixer changes nothing, when the same failures (keyed on what the tools print:
   test node ids, file:line of a finding) survive two fixes, when a fix needs a person (a change to
-  the gate's configuration, the lock, the pinned copy, CI, a ruleset or a hook is gated once more
-  and then handed over), or when its gate runs are used up; in a consumer the gate includes
+  the gate's configuration, pytest's own files and any `conftest.py` included, the lock, the
+  pinned copy, CI, a ruleset or a hook is gated once more and then handed over), or when its gate
+  runs are used up; in a consumer the gate includes
   `vendor-check`, and the fixer leaves the copy alone and says so. `verify-module` is the SpecPylot
   loop of the definition of done (step 6): run the gate on that one module (`gate --module ...
   --report-all`, which refuses a module outside the package), feed each counterexample to a repair
   agent, repeat until proven, then write the contracts out in plain words, with each condition's
-  verdict, for a human to review. `improve-module` brings one existing
+  verdict and every function set aside under `[tool.beethoven-qa.unproven]` named with its reason,
+  never as proven, for a human to review. `improve-module` brings one existing
   module up to the definition of done without changing what it does: it maps the module, pins what
   it does today with characterisation tests that must pass on the unchanged code, adds contracts and
   the layering with pure logic apart from I/O, proves them on the module with one repair per round,
-  holds the Pin phase to the module's sha256 at the start of the run, has two independent skeptics
-  look for contracts that promise nothing, and reports the contracts in plain
+  holds the Pin phase to the module's sha256 at the start of the run and the pinned tests to their
+  own sha256 in every proving round (only a repair that names the pinned assertion it corrected may
+  move it), never shows a digest to the agent it checks, stops after the Read phase on an exempt
+  module and ends without the skeptics when the gate refuses the module, has two independent
+  skeptics look for contracts that promise nothing, and reports the contracts in plain
   words; a change only a person may choose (a public function that itself does I/O, a precondition
   that would refuse an input the code accepts today) is listed, not made, and nothing is committed.
   Edits are one at a time in all three; only `improve-module`'s skeptics run side by side, and they
