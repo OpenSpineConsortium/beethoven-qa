@@ -79,7 +79,10 @@ Close with one summary line: functions, conditions, confirmed over all paths, no
   the cap, its expressions allowed any value from zero to the cap there, and a copy returning the
   full window when it was spent passed every condition, confirmed over all paths. The fix was a
   third postcondition, `used < cap or result == 0`, which that copy now fails.
-- **Uncovered.** A public method without contracts, or logic in a module listed in `exempt`.
+- **Uncovered.** A public method without contracts, or logic in a module listed in `exempt`; or a
+  function listed under `[tool.beethoven-qa.unproven]` whose contracts no test exercises: the gate
+  never checks it as a target, and every proven caller assumes its contracts rather than checking
+  them, so the tests are their only check. Name the test that calls it, or the flag stands.
 
 ## Never
 

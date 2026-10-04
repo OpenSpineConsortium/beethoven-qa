@@ -11,8 +11,12 @@ behaviour is a finding a person sees, with a test that shows it. The bar is the 
 skill (`/beethoven-qa:definition-of-done`); load it first if it is not already in context.
 `/beethoven-qa:improve-module` runs these steps on one module as a workflow (its `args` are in the
 script's header); its skeptics argue step 7 from the code and from each condition's verdict, and the
-copy-and-break check of step 7 is yours to run. Where the plugin is not installed, run its script
-with the Workflow tool's `scriptPath` from the checkout (`plugin/workflows/` here,
+copy-and-break check of step 7 is yours to run. It refuses an exempt module after mapping it, since
+`gate --module` would check nothing; a gate line beside the counterexamples (a public coroutine,
+contracts on a pydantic model, a `# crosshair:` directive) goes to a repair rather than being taken
+for a person's decision; and its report names each function set aside under
+`[tool.beethoven-qa.unproven]` as not proven, with its reason. Where the plugin is not installed,
+run its script with the Workflow tool's `scriptPath` from the checkout (`plugin/workflows/` here,
 `vendor/beethoven-qa/plugin/workflows/` in a consuming repository).
 
 ## Where the full bar applies, and where it does not
@@ -54,11 +58,15 @@ becomes private and uncontracted, or moves to a wiring module listed in `exempt`
 command line only, never logic). This is a refactor: the characterisation tests pass unchanged after
 it. Callers keep the names they import: a public function that must still do I/O is defined in the
 `exempt` wiring module and re-exported under its old name (the gate checks a function where it is
-defined), and it carries no contracts, so CrossHair never runs it. Where moving it would break more
-than it mends (a hook script that must stand alone, a loader its callers import from the module),
-it keeps its contracts, which the tests check at run time, and a person names it with its reason
-under `[tool.beethoven-qa.unproven]` in `pyproject.toml`; the gate then never runs it and says so on
-every run.
+defined), and it carries no contracts, so CrossHair never checks it as a target. Where moving it
+would break more than it mends (a hook script that must stand alone, a loader its callers import
+from the module), it keeps its contracts, which the tests check at run time, and a person names it
+with its reason under `[tool.beethoven-qa.unproven]` in `pyproject.toml` (a function, never a
+class or a method: a class is proven whole); the gate then never checks it as a target and says so
+on every run. Neither keeps CrossHair out of its body: CrossHair runs every function a contracted
+target calls, so a contracted function that calls either one does the I/O too while it is being
+proven and is itself kept private, exempt or listed; and a listed function's contracts are assumed
+by every proven caller, so the tests are their only check and must exercise them.
 
 ## 4. Contracts that state the intended behaviour
 
