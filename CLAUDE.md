@@ -5,11 +5,11 @@ greg's "code writing software framework, pixi concolic etc", the software qualit
 repository of the three-way split of `OpenSpineConsortium/beethoven-research` (greg, 2026-10-04
 04:52Z; `/mnt/project-files/plan/REPO_SPLIT.md`). It holds the definition of done, the contracts
 and the layering rule, the CrossHair/Z3 gate as a command any repository runs on its own package,
-the pinned copy that consuming repositories carry, the repository kit every repository shares, and
-the Claude Code plugin through which a session writes new code to that bar and brings existing code
-up to it. Its consumers are `beethoven-agents` (the nested agentic framework) and the research
-pipeline (REFORMS, CLAIM, the studies); it depends on nothing of ours, and nothing here may import
-either of them.
+the pinned copy that consuming repositories carry, the code standards that block a change whose
+new code breaks them, the repository kit every repository shares, and the Claude Code plugin
+through which a session writes new code to that bar and brings existing code up to it. Its
+consumers are `beethoven-agents` (the nested agentic framework) and the research pipeline (REFORMS,
+CLAIM, the studies); it depends on nothing of ours, and nothing here may import either of them.
 
 Vendor: Gregory Schwing, trading as OpenSpineConsortium. Beethoven runs Claude Code and is not an
 Anthropic product; "Claude" and "Claude Code" are Anthropic's marks, used here to say what it runs;
@@ -20,10 +20,13 @@ Anthropic product; "Claude" and "Claude Code" are Anthropic's marks, used here t
 - `/mnt/project-files/plan/REPO_SPLIT.md`: the boundary between the three repositories, the
   direction of dependence and how this one is consumed. `/mnt/project-files/plan/BUILD_PLAN.md`
   section 3 is the definition of done this repository implements; the plan governs.
-- `docs/CONSUMING.md` (adopting beethoven-qa in a repository), `docs/PARALLEL_BUILD.md`
-  (worktrees, the stream agent and workflow scripts for building in parallel).
+- `docs/CONSUMING.md` (adopting beethoven-qa in a repository), `docs/STANDARDS.md` (the code
+  standards: the six groups, their limits and sources, the new-code rule, what is not built),
+  `docs/PARALLEL_BUILD.md` (worktrees, the stream agent and workflow scripts for building in
+  parallel).
 - `plugin/skills/`: `definition-of-done`, `write-verified-module`, `improve-existing-module`,
-  `review-contracts`. They are the working instructions for writing code here and in every consumer.
+  `review-contracts`, `code-standards`. They are the working instructions for writing code here and
+  in every consumer.
 - `hpcworker`'s `CLAUDE.md` for the grid facts and the launcher's non-negotiables, which hold here.
 
 ## Decisions that are settled (do not reopen)
@@ -114,11 +117,35 @@ No module is done, and the gate will not let it enter a run or reach `main`, unt
    `RULESETS_TOKEN`); pull requests open ready for review, never as drafts; `automerge.yml` arms
    auto-merge and the required checks alone decide.
 
+## The code standards (greg, 2026-10-04 23:26Z; `docs/STANDARDS.md`)
+
+Beside the definition of done, which says whether code is correct, six groups say whether a person
+can read it, change it and trust what built it: **readability** (cognitive complexity 15,
+cyclomatic 10, 4 parameters, 25 lines of code), **design** (the Chidamber and Kemerer suite with
+LCOM4), **duplication** and **coverage** (SonarSource's Sonar way conditions on new code: at most 3%
+duplicated, at least 80% covered), **security** (bandit, each finding with its CWE) and **supply
+chain** (OpenSSF Scorecard's checks of the workflow files). Each is a module of
+`beethoven_qa.standards`, a group of `python -m beethoven_qa standards <group>|all`, a SARIF 2.1.0
+log and a job of the kit's `standards.yml`; each passes or fails alone, and the one required check
+is `standards (every group green)`. They are in this repository, not in six, because the pinned
+copy already carries them to every consumer with one command and a new repository costs greg hand
+steps (greg asked for whatever is most logical; the coordinator's default was one package and one
+check per group here).
+
+A group blocks only what the change made: findings are matched with the base commit's by rule,
+file and anchor (a qualified name or a line's text, never a line number) and only `new` or
+`updated` errors block; duplication and coverage read the new lines git reports. No setting,
+configuration file or suppression comment of a repository loosens a limit; a limit changes only in
+a release. The coaching for a session is the `code-standards` skill; a hook that runs the cheap
+groups as a session edits (Claude Code's `PostToolUse`) is the next step and is not built.
+
 Never skip, disable or quarantine a test, loosen a symbolic bound, remove a contract, narrow a
 precondition to exclude an input the callers really pass, add a `# crosshair:` directive, exempt
 a module that holds logic, or set aside under `unproven` a function CrossHair can run, to get
-green. A precondition that states the function's real domain, which no caller ever leaves, is not
-dodging (see `vendor.stale_files`).
+green; nor raise a standards limit, add a suppression comment the standards ignore anyway, rename a
+function to dodge its findings, or weaken a test so coverage counts fewer lines. A precondition
+that states the function's real domain, which no caller ever leaves, is not dodging (see
+`vendor.stale_files`).
 
 ## What this repository provides
 
@@ -159,12 +186,16 @@ dodging (see `vendor.stale_files`).
   drops the variables `git rev-parse --local-env-vars` lists (`GIT_DIR` among them, which a hook
   inherits) and keeps the two configuration carriers, so `safe.directory` given through the
   environment still reaches git.
+- `beethoven_qa.standards` and `python -m beethoven_qa standards <group>|all [--base <ref>|auto|none]
+  [--sarif DIR]`: the code standards (`docs/STANDARDS.md`). Exit 0 when every group asked for
+  passed, 1 when one did not, 2 when one could not run.
 - The repository kit, carried byte for byte by every consumer: `.githooks/pre-push`,
   `.github/workflows/automerge.yml`, `.github/workflows/rulesets.yml`,
-  `.claude/hooks/session-start.sh`. Change one here and every consumer takes it with its next copy
-  (`vendor --kit`); a consumer that re-pins to a release whose kit changed without `--kit` fails
-  `vendor-check` on the file that differs until it does, by design. This release changes
-  `.githooks/pre-push`.
+  `.claude/hooks/session-start.sh`, `.github/workflows/standards.yml`. Change one here and every
+  consumer takes it with its next copy (`vendor --kit`); a consumer that re-pins to a release whose
+  kit changed without `--kit` fails `vendor-check` on the file that differs until it does, by
+  design. Release 2.0.0 adds `standards.yml` and changes `automerge.yml` and `rulesets.yml` (actions
+  pinned to a commit, writes granted on the job only).
 - `plugin/` and `.claude-plugin/marketplace.json`: the Claude Code plugin `beethoven-qa` (skills,
   the `stream` agent, the workflows `gate-until-green`, `verify-module`, `improve-module`). On a
   laptop: `/plugin marketplace add OpenSpineConsortium/beethoven-qa`, then
@@ -256,12 +287,18 @@ dodging (see `vendor.stale_files`).
   - An untracked `.claude/settings.local.json`, which Claude Code writes on an "always allow"
     answer, would make the new hook refuse every push from that checkout; `.gitignore` lists it.
 
+- The code standards (2026-10-05): what was measured while building them, the tools' behaviour
+  without the flags that disable a repository's suppressions among it, is under "Measured" in
+  `docs/STANDARDS.md`. The symbolic gate went from 10 targets in about 2 minutes to 32 in about 7
+  on 4 cores.
+
 ## Build and test
 
 ```sh
 pixi install --locked         # reconstruct the exact env from the lock; CI uses --locked too
-pixi run --locked gate        # lint (ruff) + typecheck (mypy strict) + tests (pytest) + symbolic (CrossHair/Z3)
+pixi run --locked gate        # lint (ruff) + typecheck (mypy strict) + tests (pytest) + symbolic (CrossHair/Z3) + standards
 pixi run --locked symbolic    # just the gate: python -m beethoven_qa gate
+pixi run --locked standards   # the code standards, every group, against where this branch left main
 pixi run --locked python -m beethoven_qa gate --module beethoven_qa.vendor --report-all   # one module
 pixi run hooks                # point git at .githooks (the session-start hook does this in a cloud session)
 ```
@@ -277,7 +314,8 @@ tree with uncommitted or untracked files: commit everything first.
 
 - `pixi.toml` / `pixi.lock` — the verification stack, pinned for `linux-64`.
 - `src/beethoven_qa/` — `contracts.py`, `gate.py`, `vendor.py`, `example.py`, `__main__.py` (the
-  command line; exempt from the contract rule as wiring and I/O).
+  command line; exempt from the contract rule as wiring and I/O), `standards/` (one module per
+  group; `findings.py`, `newcode.py`, `sarif.py` and `group.py` shared; `run.py` the runner).
 - `tests/` — pytest under typeguard's import hook; `test_hooks.py` runs the kit's real pre-push
   hook with a stub pixi, a bare remote and a linked worktree.
 - `plugin/` — the Claude Code plugin; `.claude-plugin/marketplace.json` — the marketplace listing it.
@@ -286,7 +324,9 @@ tree with uncommitted or untracked files: commit everything first.
   module loading, `new.target`, both grammars); `tools/check_workflows.test.mjs` — its tests, and
   the workflow scripts' control flow under stand-in hooks (`node --test
   tools/check_workflows.test.mjs`).
-- `docs/` — `CONSUMING.md`, `PARALLEL_BUILD.md`.
+- `docs/` — `CONSUMING.md`, `STANDARDS.md`, `PARALLEL_BUILD.md`.
+- `tests/data/` — the OASIS SARIF 2.1.0 schema every standards log is validated against, with its
+  source in `tests/data/README.md`.
 - `.githooks/`, `.github/`, `.claude/` — the kit, the CI lanes, the rule as code, session settings.
 
 ## How to be useful here

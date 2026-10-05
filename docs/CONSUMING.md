@@ -44,6 +44,7 @@ Anthropic's marks, used here to say what it runs.
   .github/workflows/automerge.yml   kit: auto-merge armed on every pull request opened ready
   .github/workflows/rulesets.yml    kit: .github/rulesets/*.json applied to GitHub
   .claude/hooks/session-start.sh    kit: pixi and the locked environment in a cloud session
+  .github/workflows/standards.yml   kit: the code standards, one job per group, one required check
   .github/workflows/ci.yml          its own: the gate lane (step 5) and any lanes of its own
   .github/rulesets/main.json        its own: names its required checks
   .claude/settings.json             its own: wires the session-start hook, worktree.baseRef
@@ -61,7 +62,7 @@ consumer's root. Then, from the consumer's root:
 
 ```sh
 git -C ../beethoven-qa fetch --tags
-git -C ../beethoven-qa checkout v1.0.0          # the release to take; a detached HEAD is fine
+git -C ../beethoven-qa checkout v2.0.0          # the release to take; a detached HEAD is fine
 git -C ../beethoven-qa status --porcelain       # must print nothing
 pixi run --locked --manifest-path ../beethoven-qa/pixi.toml python -m beethoven_qa vendor --into . --kit
 ```
@@ -81,7 +82,7 @@ pixi run --locked --manifest-path ../beethoven-qa/pixi.toml python -m beethoven_
 
   ```
   repository: OpenSpineConsortium/beethoven-qa
-  ref: v1.0.0                       # the tag exactly at HEAD, or "untagged"
+  ref: v2.0.0                       # the tag exactly at HEAD, or "untagged"
   commit: <the full 40-character SHA>
   tree_sha256: <sha256 over the sorted (path, sha256 of the file) pairs>
   files: <how many files the copy holds, ORIGIN not counted>
@@ -127,8 +128,9 @@ copy, its ORIGIN and the kit files together, the message naming the release.
 ## 2. The consumer's `pixi.toml`
 
 The same verification stack as beethoven-qa's own `pixi.toml` (copy its dependency lines; they are
-repeated here as they stand at 1.0.0), the repository's own dependencies beside them, the copy on
-`PYTHONPATH`, and the five lanes of the gate:
+repeated here as they stand at 2.0.0, but `jsonschema`, which only beethoven-qa's own tests use),
+the repository's own dependencies beside them, the copy on `PYTHONPATH`, and the six lanes of the
+gate:
 
 ```toml
 [workspace]
@@ -150,6 +152,13 @@ typeguard = ">=4"
 pytest = ">=8"
 ruff = ">=0.6"
 mypy = ">=1.10"
+# The code standards (docs/STANDARDS.md of beethoven-qa), each tool run as its own process.
+complexipy = ">=8"
+radon = ">=6"
+bandit = ">=1.9"
+coverage = ">=7.10"
+pyyaml = ">=6"
+types-pyyaml = ">=6"
 # The repository's own dependencies follow here.
 
 [pypi-dependencies]
@@ -166,8 +175,9 @@ lint = "ruff check src tests && ruff format --check src tests"
 typecheck = "mypy src"
 test = "pytest -q"
 symbolic = "python -m beethoven_qa gate"
+standards = "python -m beethoven_qa standards all"
 vendor-check = "python -m beethoven_qa vendor-check"
-gate = { depends-on = ["lint", "typecheck", "test", "symbolic", "vendor-check"] }
+gate = { depends-on = ["lint", "typecheck", "test", "symbolic", "standards", "vendor-check"] }
 hooks = "git config core.hooksPath .githooks"
 ```
 
@@ -192,7 +202,7 @@ repository itself. A file Claude Code writes beside the checkout, such as
 From then on the lock changes only on purpose, by pixi, in a change that says so; never by hand,
 never by a stray `pixi install` or `pixi update`, and every `pixi run` carries `--locked` (without
 it pixi re-solves a manifest that drifted from its lock, without a word). Measured 2026-10-04: this manifest in a throwaway
-consumer locked, installed and ran `pixi run --locked gate` green through all five lanes, and
+consumer locked, installed and ran `pixi run --locked gate` green through all five lanes of 1.0.0, and
 `pixi run --manifest-path <consumer>/pixi.toml python` started from another directory imported both
 the consumer's package and the copy; the gate then failed, as it should, on a
 public function without contracts and on a wrong body (`resume_at(0, 0, 1) (which returns 0)`).
@@ -222,6 +232,14 @@ runs the body of every function a contracted target calls, listed or not, so a c
 that calls a listed one does the I/O too while it is being proven and is itself kept private,
 exempt or listed; and a listed function's contracts are assumed by every proven caller, never
 checked through it, so the tests are their only check and must exercise them.
+
+The standards lane holds the package's new code to the six groups of `docs/STANDARDS.md`
+(readability, design, duplication, coverage, security, supply chain), against where the branch left
+the remote's default branch. It reads the package `[tool.beethoven-qa]` names and
+`.github/workflows/`, needs no table of its own (its limits are the release's, and no setting of the
+repository loosens them), and blocks only what the change made: the findings the old code already
+holds are reported and pass. Its coverage group runs the repository's tests a second time, under
+coverage.py, as `pytest` from the root with the repository's own pytest settings.
 
 ## 3. `pyproject.toml`: the gate's table and the tools
 
@@ -313,13 +331,21 @@ env:
   # The pixi that produced the committed lock, fetched from its release asset by name.
   PIXI_VERSION: 0.81.0
 
+# Nothing writes; the supply-chain standard refuses a workflow without this, or one that grants a
+# write at the top.
+permissions:
+  contents: read
+
 jobs:
   gate:
     name: gate (lock → lint, typecheck, tests, CrossHair/Z3, vendor-check)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to a commit, the tag beside it (the supply-chain standard refuses a tag alone).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: install pixi
         run: |
           curl -fsSL -o /usr/local/bin/pixi \
@@ -341,9 +367,14 @@ jobs:
         run: pixi run --locked symbolic
 ```
 
-`.github/rulesets/main.json` names that job as a required check, its `context` exactly the job's
-`name` (a required check that no job reports under that exact name keeps a pull request waiting),
-beside any lane of the repository's own (beethoven-agents adds its image lane):
+The code standards run in the kit's `.github/workflows/standards.yml`, not in this file: one job
+per group, and `standards (every group green)`, green only when every group's is. The standards
+lane of the gate task runs them before a push too; CI runs them per group so a red one names itself.
+
+`.github/rulesets/main.json` names the gate job and `standards (every group green)` as required
+checks, each `context` exactly the job's `name` (a required check that no job reports under that
+exact name keeps a pull request waiting), beside any lane of the repository's own (beethoven-agents
+adds its image lane):
 
 ```json
 {
@@ -365,6 +396,10 @@ beside any lane of the repository's own (beethoven-agents adds its image lane):
         "required_status_checks": [
           {
             "context": "gate (lock → lint, typecheck, tests, CrossHair/Z3, vendor-check)",
+            "integration_id": 15368
+          },
+          {
+            "context": "standards (every group green)",
             "integration_id": 15368
           }
         ]
@@ -532,6 +567,16 @@ dialog, which a cloud session never shows; no thread has tried it.
    beethoven-qa's own environment.
 3. If the release changed the dependency lines of beethoven-qa's `pixi.toml`, make the same change
    in the consumer's, run `pixi lock` on purpose, and say so in the same change.
+
+   **From 1.0.0 to 2.0.0**: the release adds the code standards. Take it with `--kit` (the kit
+   gains `.github/workflows/standards.yml`, and `automerge.yml` and `rulesets.yml` now pin their
+   actions and grant writes only on the job that needs them); add the six dependency lines and the
+   `standards` task of step 2 and re-lock; add `standards (every group green)` to
+   `.github/rulesets/main.json`; and give the repository's own workflows top-level
+   `permissions: contents: read` and actions pinned to a commit, or the supply-chain group reports
+   them (as findings the old workflows held, they pass, but any line the change touches is new).
+   The rule is applied by the next daily run of `rulesets.yml` after the merge, or by hand with
+   "Run workflow".
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
    old and the new release; then a pull request, ready for review, which merges when the gate is
    green. A red gate after an update is reported red and fixed at its cause, in the consumer's code
@@ -590,3 +635,5 @@ dialog, which a cloud session never shows; no thread has tried it.
   version change.
 - The CI gate lane and ruleset above in a consuming repository on GitHub: the shape is
   beethoven-research's, which ran there; the `vendor-check` step and the longer check name have not.
+- The standards workflow and its required check on GitHub, in beethoven-qa or in a consumer, and the
+  standards lane over a consumer's package and tests (beethoven-agents' 277 tests under coverage).

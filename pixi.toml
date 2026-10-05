@@ -40,6 +40,16 @@ typeguard = ">=4"        # test-enclave runtime checking
 pytest = ">=8"
 ruff = ">=0.6"           # lint + format check
 mypy = ">=1.10"          # static types, the layer above the runtime checks
+# --- the code standards (beethoven_qa.standards), one group per standard of the Drive file
+# "Auditable Code Quality Standards". Each tool runs as its own process and is read through its
+# JSON output; ruff above serves the readability group as well.
+complexipy = ">=8"       # readability: cognitive complexity (Campbell, SonarSource)
+radon = ">=6"            # design: McCabe complexity per method, the weights of WMC
+bandit = ">=1.9"         # security: weaknesses mapped to CWE (the catalogue ISO/IEC 5055 is built on)
+coverage = ">=7.10"      # coverage: line coverage of the tests, read for the new lines only
+pyyaml = ">=6"           # supply chain: the workflow files
+types-pyyaml = ">=6"     # mypy's stubs for pyyaml
+jsonschema = ">=4"       # tests only: every SARIF file validates against the OASIS 2.1.0 schema
 
 [pypi-dependencies]
 # The symbolic-proof layer. CrossHair is published on PyPI only (not conda-forge); it pulls in
@@ -62,6 +72,9 @@ test = "pytest -q"
 # while violating a postcondition, within the declared bound per condition. A package with nothing
 # to prove fails, never passes (src/beethoven_qa/gate.py says what else it refuses).
 symbolic = "python -m beethoven_qa gate"
-gate = { depends-on = ["lint", "typecheck", "test", "symbolic"] }
+# The code standards, each group on its own (docs/STANDARDS.md), on the code new since where this
+# branch left the remote's default branch; CI runs each group as its own job (standards.yml).
+standards = "python -m beethoven_qa standards all"
+gate = { depends-on = ["lint", "typecheck", "test", "symbolic", "standards"] }
 # The gate before every push, not only in CI: one command points git at the repository's hooks.
 hooks = "git config core.hooksPath .githooks"

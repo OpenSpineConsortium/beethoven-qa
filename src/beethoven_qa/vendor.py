@@ -84,6 +84,7 @@ KIT: tuple[str, ...] = (
     ".github/workflows/automerge.yml",
     ".github/workflows/rulesets.yml",
     ".claude/hooks/session-start.sh",
+    ".github/workflows/standards.yml",
 )
 # The kit files git runs, so they must be executable: git skips a hook that is not, with only a
 # hint. ORIGIN records no modes, so this is what the plain vendor-check knows of the release's.

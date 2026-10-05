@@ -37,6 +37,10 @@
           {
             "context": "plugin (validate, workflow scripts)",
             "integration_id": 15368
+          },
+          {
+            "context": "standards (every group green)",
+            "integration_id": 15368
           }
         ]
       }
