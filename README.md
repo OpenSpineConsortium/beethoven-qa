@@ -2,9 +2,10 @@
 
 How code for the Beethoven engine is written and proven before it may run. It holds the definition
 of done, the contract decorators, the CrossHair/Z3 gate as a command any repository runs on its own
-package, the pinned copy that consuming repositories carry, the repository kit they share, and the
-Claude Code plugin through which a session writes new code to that bar and brings existing code up
-to it.
+package, the pinned copy that consuming repositories carry, the code standards that block a change
+whose new code breaks them (readability, design, duplication, coverage, security, supply chain;
+`docs/STANDARDS.md`), the repository kit they share, and the Claude Code plugin through which a
+session writes new code to that bar and brings existing code up to it.
 
 It is one of three repositories: this one, `beethoven-agents` (the nested agentic framework) and the
 research pipeline. They depend in one direction only, qa <- agents <- research, and nothing here
@@ -18,7 +19,8 @@ Vendor: Gregory Schwing, trading as OpenSpineConsortium. Private; the code is pr
 
 ```sh
 pixi install --locked     # the exact environment from the lock
-pixi run --locked gate    # lint, typecheck, tests, then CrossHair + Z3 over the package
+pixi run --locked gate    # lint, typecheck, tests, CrossHair + Z3 over the package, the code standards
+pixi run --locked python -m beethoven_qa standards readability --base origin/main   # one group
 pixi run hooks            # the pre-push hook runs the same gate before anything leaves the machine
 ```
 
@@ -38,8 +40,8 @@ The Claude Code plugin, on a laptop:
 /plugin install beethoven-qa@beethoven-qa
 ```
 
-It brings the skills `definition-of-done`, `write-verified-module`, `improve-existing-module` and
-`review-contracts`, the `stream` agent and the workflows `/beethoven-qa:gate-until-green`,
+It brings the skills `definition-of-done`, `write-verified-module`, `improve-existing-module`,
+`review-contracts` and `code-standards`, the `stream` agent and the workflows `/beethoven-qa:gate-until-green`,
 `/beethoven-qa:verify-module` and `/beethoven-qa:improve-module`.
 
 ## The definition of done
