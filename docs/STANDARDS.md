@@ -143,7 +143,7 @@ bandit 1.9.4, coverage.py 7.16.2, ruff 0.16.10, CrossHair 0.0.111, git 2.43.
   (`tests/test_standards.py` runs real git). A person's `diff.noPrefix` would remove the `b/`, so
   the prefixes are given on the command line.
 - On beethoven-qa itself, against `main` before this change: every group passes on the new code,
-  the coverage group with 1100 of 1141 new lines run by the tests; 17 readability findings in the old
+  the coverage group with 1101 of 1142 new lines run by the tests; 17 readability findings in the old
   code are recorded as unchanged. `standards all` took about a minute, 45 s of it the coverage
   group running the test suite again under coverage.
 - The symbolic gate grew from 10 targets to 32 and from about 2 to about 7 minutes on 4 cores; the
