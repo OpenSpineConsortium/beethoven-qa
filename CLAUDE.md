@@ -166,10 +166,15 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   lower it, never raise it), each condition bounded by `per_condition_timeout`. `--module` limits
   both checks to one module (an entry of a deeper module stays that module's, imported or not);
   `--report-all` prints every condition's verdict and fails on a precondition no input can meet.
-- `beethoven_qa.vendor`, `python -m beethoven_qa vendor --into <repo> [--kit]` and
+- `beethoven_qa.vendor`, `python -m beethoven_qa vendor --into <repo> --ref <tag> [--kit]` and
   `python -m beethoven_qa vendor-check [--source <beethoven-qa checkout>]`: the pinned copy at
-  `vendor/beethoven-qa/`, read from the release commit's own objects, with its `ORIGIN` record, and
-  the check that the copy and the kit files (bytes and executable bit) are untouched. The plain
+  `vendor/beethoven-qa/`, with its `ORIGIN` record, and the check that the copy and the kit files
+  (bytes and executable bit) are untouched. From 3.0.0 (greg's card of 2026-10-07 18:11Z) `vendor`
+  reads the release from GitHub through the person's own `gh` sign-in, like every other copy's
+  `pull.sh`: only a commit `main` contains, each file's bytes checked against the blob id the
+  commit's tree gives it, no checkout of beethoven-qa read; it runs from the consumer's own copy
+  (from a clone of the release the first time, when the copy is older than 3.0.0), and the `cli`
+  export is at version 2 for the new required `--ref`. The plain
   check catches an edit that leaves ORIGIN alone; an edit that also rewrites ORIGIN is caught only
   with `--source`, which rebuilds the tree from the commit ORIGIN names (docs/CONSUMING.md). So is
   an edit to the copy's own `vendor.py`, since the consumer's environment runs the copy's code:

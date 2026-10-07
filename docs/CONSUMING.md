@@ -58,34 +58,51 @@ one is made in beethoven-qa and arrives with the next release: a consumer that t
 with `--kit` has the new file in the same commit as the new copy, and one that takes it without
 `--kit` keeps its old kit and fails `vendor-check` until it does, by design.
 
-## 1. Take the copy from a clean, tagged checkout
+## 1. Take the copy from GitHub
 
-Clone beethoven-qa beside the consuming repository, so that `../beethoven-qa` names it from the
-consumer's root. Then, from the consumer's root:
+The copy is read from GitHub at a release tag, through `gh` and your own sign-in, the way every other
+repository's copies are pulled (the interface standard's rule 3); no checkout of beethoven-qa is
+read. `gh auth status` must show an account that can read `OpenSpineConsortium/beethoven-qa`. From
+the consumer's root, once it carries a copy of 3.0.0 or later:
 
 ```sh
-git -C ../beethoven-qa fetch --tags
-git -C ../beethoven-qa checkout v2.0.0          # the release to take; a detached HEAD is fine
-git -C ../beethoven-qa status --porcelain       # must print nothing
-pixi run --locked --manifest-path ../beethoven-qa/pixi.toml python -m beethoven_qa vendor --into . --kit
+pixi run --locked python -m beethoven_qa vendor --into . --ref v3.0.0 --kit
 ```
 
-- **Where it runs from does not matter.** beethoven-qa's environment puts
-  `$PIXI_PROJECT_ROOT/src` on `PYTHONPATH`, an absolute path, so the command imports the checkout's
-  own package wherever it is started. Measured 2026-10-04: started from a throwaway consumer's root,
-  it wrote 22 files and the kit and exited 0. (An earlier draft set the relative path `src`; started
-  from the consumer's root, that stopped with `No module named beethoven_qa`.)
-- **`--locked`** takes beethoven-qa's environment from its lock as it is. A re-solve would rewrite
-  `pixi.lock`, and the then-dirty checkout would be refused anyway.
+That is the consumer's own pinned copy taking the release, and every release after the first is
+taken this way. The first time, when the consumer has no copy yet or one older than 3.0.0 (whose
+`vendor` read a checkout instead), the same command runs once from a clone of beethoven-qa at the
+release, since only code of 3.0.0 or later can read GitHub:
+
+```sh
+gh repo clone OpenSpineConsortium/beethoven-qa /tmp/beethoven-qa-v3 -- --quiet --branch v3.0.0 --depth 1
+pixi run --locked --manifest-path /tmp/beethoven-qa-v3/pixi.toml python -m beethoven_qa vendor --into . --ref v3.0.0 --kit
+```
+
+Only the clone's code runs; the files of the copy still come from GitHub, so nothing in the clone
+can change them. (beethoven-qa's environment puts `$PIXI_PROJECT_ROOT/src` on `PYTHONPATH`, an
+absolute path, so the command imports the clone's package wherever it is started.)
+
+- **Where the files come from.** `gh api` against `repos/OpenSpineConsortium/beethoven-qa`: the
+  commit the ref names, refused unless `main` contains it (GitHub's comparison of `main` with it
+  says `identical` or `behind`), then the commit's tree, then each file the copy takes as its blob.
+  The bytes of each blob are hashed the way git names objects (SHA-1 over `blob <size>`, a NUL and
+  the bytes) and must give the id the commit's tree lists for that file, so they are the commit's
+  bytes whatever carried them. Nothing holds a token: `gh` uses the sign-in of whoever runs it, and
+  nothing reaches an argument. Measured 2026-10-07 from a cloud session: 2.0.0 taken this way into
+  a throwaway consumer, 41 files in 19 s, wrote the same `ORIGIN` and the same bytes as the copy
+  beethoven-agents had taken from a checkout.
+- **`--locked`** takes the environment from its lock as it is; a re-solve would rewrite
+  `pixi.lock`.
 - **What it writes.** Into `vendor/beethoven-qa/`: the files of the release commit under
   `pyproject.toml`, `src/beethoven_qa/`, `plugin/`, `.claude-plugin/` and (from 2.0.0)
-  `interface/`, read from git's own objects (never the working tree, so no `.pixi/`, no caches, no
+  `interface/`, as the commit holds them (never a working tree, so no `.pixi/`, no caches, no
   line-ending conversion and no edit git was told to ignore), each with the mode the commit gives
   it; the five kit files under `kit/`; and last `ORIGIN`:
 
   ```
   repository: OpenSpineConsortium/beethoven-qa
-  ref: v2.0.0                       # the tag exactly at HEAD, or "untagged"
+  ref: v3.0.0                       # the tag given, when it is a tag of that commit; else "untagged"
   commit: <the full 40-character SHA>
   tree_sha256: <sha256 over the sorted (path, sha256 of the file) pairs>
   files: <how many files the copy holds, ORIGIN not counted>
@@ -95,10 +112,11 @@ pixi run --locked --manifest-path ../beethoven-qa/pixi.toml python -m beethoven_
   executable bit the commit gives them; without it the live kit files are left as they are, and
   `vendor-check` fails while one is missing or differs. The copy is itself a plugin marketplace (its
   `.claude-plugin/marketplace.json` lists `./plugin`), which is what step 7's image registers.
-- **What it refuses, before it writes anything.** The beethoven-qa checkout with any uncommitted
-  change, an untracked file included (a copy is of a commit); a source that is not the root of a
-  beethoven-qa checkout (run from a consumer, the copy refuses to copy itself); a target that is not
-  the root of a git checkout, or is beethoven-qa itself; a link anywhere on a path it would write
+- **What it refuses, before it writes anything.** A ref GitHub does not know, or a commit `main`
+  does not contain (a pull request's branch); bytes that are not the blob the tree names, a tree
+  listing GitHub cut short, an answer not in the shape GitHub documents, a `gh` that fails or is not
+  installed (gh's own last line says why); a target that is not the root of a git checkout, or is
+  the beethoven-qa checkout the command runs from; a link anywhere on a path it would write
   (`vendor/`, `vendor/beethoven-qa/`, `ORIGIN`, any file of the copy, `.github/`, `.claude/`, a kit
   file); a file where the release has a directory, or the reverse; an existing copy that holds a
   link; a link or a submodule in the release itself; and any existing file it would replace whose
@@ -115,14 +133,15 @@ pixi run --locked --manifest-path ../beethoven-qa/pixi.toml python -m beethoven_
   old copy was committed (an earlier `git add -u -- vendor/beethoven-qa` did not: git 2.55 on
   GitHub's runners refuses it for a folder git does not track yet, where 2.43 accepted it);
   `vendor-check` fails until it is gone, so nothing leaves a repository without a reviewed commit.
-- **An untagged commit is not refused**; ORIGIN then says `ref: untagged`. Take tagged releases
-  only; a reviewer who sees `untagged` asks why.
+- **An untagged commit is not refused**: a commit `main` contains, given by its id or by a branch,
+  is taken, and ORIGIN then says `ref: untagged`. Take tagged releases only; a reviewer who sees
+  `untagged` asks why.
 
 | Exit | Meaning |
 | - | - |
 | 0 | The copy (and with `--kit` the kit) is written and nothing of an older copy is left over |
 | 1 | The copy is written, but the copy already there held files this release dropped; nothing was deleted; run the printed line, then `vendor-check` |
-| 2 | Refused, for one of the reasons above, before anything was written; or git itself failed |
+| 2 | Refused, for one of the reasons above (gh's failures among them), before anything was written; or git itself failed |
 | 3 | Stopped part way by an error of the file system (a full disk, a permission, a link that appeared after the checks); `git status` shows what was written |
 
 Review the result (`git status`, `git diff --stat`, `cat vendor/beethoven-qa/ORIGIN`) and commit the
@@ -629,10 +648,10 @@ dialog, which a cloud session never shows; no thread has tried it.
    installed from a git marketplace stays on its cached copy until that string changes (marketplace
    hosting page, "Release a new version"), and the update arrives with
    `/plugin marketplace update beethoven-qa` or `claude plugin update beethoven-qa@beethoven-qa`.
-2. **In the consumer**, on a branch: step 1 again with the new tag. Exit 1 means the release dropped
-   files; run the printed line. Then `pixi run --locked vendor-check` and `pixi run --locked gate`,
-   and, with the beethoven-qa checkout beside it, the anchored check from that checkout's own
-   environment, the way step 1 runs `vendor`:
+2. **In the consumer**, on a branch: step 1 again with the new tag, from the consumer's own copy.
+   Exit 1 means the release dropped files; run the printed line. Then `pixi run --locked
+   vendor-check` and `pixi run --locked gate`, and, with a beethoven-qa checkout at the release
+   beside it (`../beethoven-qa`), the anchored check from that checkout's own environment:
    `pixi run --locked --manifest-path ../beethoven-qa/pixi.toml python -m beethoven_qa vendor-check --root . --source ../beethoven-qa`.
    Run from the consumer's environment instead, `--source` is refused with exit 1: that
    environment imports the copy, so the check would be the copy's own code vouching for itself.
@@ -655,6 +674,12 @@ dialog, which a cloud session never shows; no thread has tried it.
    gate (step 2) and its step to the CI gate lane (step 5), and run `pixi run --locked boundary`
    until it says the rules hold. A copy of 1.0.0 carries no manifest, so the lane says to take
    2.0.0.
+   **From 2.0.0 to 3.0.0**: `vendor` reads the release from GitHub and takes `--ref`. A copy of
+   2.0.0 cannot do that (its `vendor` reads a checkout), so this once step 1's second form runs it
+   from a clone of 3.0.0; every release after is taken by the consumer's own copy. The `cli`
+   export is at version 2, because `--ref` is new and required: change the consumer's import of
+   `cli` in `interface/INTERFACE.json` to version 2 in the same change, or the boundary lane says
+   the copy no longer offers `cli` version 1. The kit and the dependency lines are unchanged.
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
    old and the new release; then a pull request, ready for review, which merges when the gate is
    green. A red gate after an update is reported red and fixed at its cause, in the consumer's code
@@ -701,8 +726,8 @@ dialog, which a cloud session never shows; no thread has tried it.
   `SKIP_GATE=1` skips the pre-push gate only knowingly, with the reason in the commit; it also skips
   the hook's own checks (that the pushed ref is HEAD and the tree clean), so such a push is unproven
   on every count, and CI runs every lane regardless.
-- **Taking a copy from a dirty, untagged or vendored checkout**, or running `pixi update` or a plain
-  `pixi install` to change a lock.
+- **Taking a copy from anywhere but GitHub**, from a commit `main` does not contain, or without a
+  tag, or running `pixi update` or a plain `pixi install` to change a lock.
 - **Skipping, disabling or weakening a test, a contract or a symbolic bound to get green**,
   listing a module with logic in `exempt`, or setting aside under `unproven` a function CrossHair
   can run.

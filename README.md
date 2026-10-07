@@ -29,7 +29,7 @@ pixi run hooks            # the pre-push hook runs the same gate before anything
 In a consuming repository (`docs/CONSUMING.md` has the whole of it):
 
 ```sh
-python -m beethoven_qa vendor --into <repository> --kit   # from a clean, tagged checkout of this one
+python -m beethoven_qa vendor --into . --ref <tag> --kit   # the release, read from GitHub with your gh sign-in
 python -m beethoven_qa vendor-check                       # at the consumer's root: the copy and the kit are untouched
                                                           # (`--source <qa>` only from this repository's own environment)
 python -m beethoven_qa gate                               # the consumer's own package, as [tool.beethoven-qa] names it
