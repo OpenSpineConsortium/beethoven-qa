@@ -167,6 +167,12 @@ def test_line_reaches() -> None:
     assert line_reaches(f"test -d ${{{DIR_VARIABLE}}}", "")[0][0] == DIR_VARIABLE
     assert line_reaches(f"git clone git@github.com:{ORG}/{HPC}.git", "")[0][0] == HPC
     assert line_reaches(f"pip install git+https://github.com/{ORG}/{AGENTS}", "")[0][0] == AGENTS
+    # GitHub reads an address in any case, so a clone or a git URL counts in any case too; a dot of
+    # a name is a dot, never any character.
+    upper = f"GIT Clone https://github.com/{ORG.lower()}/{HPC.upper()}"
+    assert line_reaches(upper, "") == ((HPC.upper(), boundary._LINE_RULES[3][1]),)
+    assert line_reaches(f"x @ GIT+SSH://github.com/{ORG.upper()}/{AGENTS.title()}", "") != ()
+    assert line_reaches(f"git clone {ORG}/openspineconsortiumXgithubXio", "") == ()
     assert line_reaches(f"cp {UP}{AGENTS}/x .", AGENTS) == ()  # its own name
     assert line_reaches("   ", "") == ()
     # The hub's name is the product's too: an address under it is no checkout; its parent form is.

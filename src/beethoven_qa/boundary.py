@@ -148,16 +148,32 @@ _COMPUTED_NAMES = "|".join(
 _SIBLING = re.compile(r"\.\./(" + _NAMES + r")(?![A-Za-z0-9_.-])")
 _COMPUTED = re.compile(r"[)}]/(" + _COMPUTED_NAMES + r")(?![A-Za-z0-9_.-])")
 _VARIABLE = re.compile(r"\b(" + "|".join(CHECKOUT_VARIABLES) + r")\b")
-_CLONE = re.compile(
-    r"\b(?:git\s+clone|gh\s+repo\s+clone|git\s+submodule\s+add)\b[^\n]*?"
-    + OWNER
+
+
+def _anycase(text: str) -> str:
+    # ``text`` as a pattern whatever the case of its ASCII letters. Spelled out rather than given
+    # re.IGNORECASE: CrossHair 0.0.111 compiles each literal of an IGNORECASE pattern unescaped, so
+    # the "+" of "git+https" stopped it with "nothing to repeat" and the "." of a name matched any
+    # character (crosshair/libimpl/relib.py, unicode_ignorecase_mask; seen on CI, 2026-10-07).
+    return "".join(
+        f"[{c.lower()}{c.upper()}]" if c.isascii() and c.isalpha() else re.escape(c) for c in text
+    )
+
+
+# An address of another repository of the organisation, in any case, as GitHub reads it.
+_AT = (
+    _anycase(OWNER)
     + "/("
-    + _NAMES
-    + r")(?![A-Za-z0-9_-])",
-    re.IGNORECASE,
+    + "|".join(_anycase(n) for n in sorted(REPOSITORIES, key=len, reverse=True))
+    + r")(?![A-Za-z0-9_-])"
 )
+_COMMANDS = (
+    r"\s+".join(_anycase(w) for w in c.split())
+    for c in ("git clone", "gh repo clone", "git submodule add")
+)
+_CLONE = re.compile(r"\b(?:" + "|".join(_COMMANDS) + r")\b[^\n]*?" + _AT)
 _GIT_URL = re.compile(
-    r"git\+(?:https?|ssh)://\S*?" + OWNER + "/(" + _NAMES + r")(?![A-Za-z0-9_-])", re.IGNORECASE
+    _anycase("git") + r"\+(?:" + _anycase("http") + "[sS]?|" + _anycase("ssh") + r")://\S*?" + _AT
 )
 _LINE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (_SIBLING, "a path built from this checkout's parent names another repository's checkout"),
@@ -218,7 +234,15 @@ def _covers(pattern: str, path: str) -> bool:
     return len(parts) == len(names) and all(_part(p, n) for p, n in zip(parts, names, strict=True))
 
 
+# The precondition is the real domain (a path git tracks, a file under interface/, an export's
+# path, which Export refuses with a NUL), and it keeps CrossHair 0.0.111 away from its fault with
+# symbolic strings that hold NUL: on CI (2026-10-07) it reported the second postcondition false
+# for covered("\\x00/\\x00\\x00", ("\\x00/",)), which returns True and holds it when run.
 @beartype
+@require(
+    lambda path, patterns: "\x00" not in path and all("\x00" not in p for p in patterns),
+    "paths of a tree and of a manifest, which never hold NUL",
+)
 @ensure(lambda result, path, patterns: path not in patterns or result, "a listed path is covered")
 @ensure(
     lambda result, path, patterns: (
