@@ -4,8 +4,10 @@ How code for the Beethoven engine is written and proven before it may run. It ho
 of done, the contract decorators, the CrossHair/Z3 gate as a command any repository runs on its own
 package, the pinned copy that consuming repositories carry, the code standards that block a change
 whose new code breaks them (readability, design, duplication, coverage, security, supply chain;
-`docs/STANDARDS.md`), the repository kit they share, and the Claude Code plugin through which a
-session writes new code to that bar and brings existing code up to it.
+`docs/STANDARDS.md`), the boundary check of the Beethoven interface standard, the repository kit
+they share, and the Claude Code plugin through which a session writes new code to that bar and
+brings existing code up to it. What another repository may take from this one is
+`interface/INTERFACE.json` (`interface/README.md`).
 
 It is one of three repositories: this one, `beethoven-agents` (the nested agentic framework) and the
 research pipeline. They depend in one direction only, qa <- agents <- research, and nothing here
@@ -19,7 +21,7 @@ Vendor: Gregory Schwing, trading as OpenSpineConsortium. Private; the code is pr
 
 ```sh
 pixi install --locked     # the exact environment from the lock
-pixi run --locked gate    # lint, typecheck, tests, CrossHair + Z3 over the package, the code standards
+pixi run --locked gate    # lint, typecheck, tests, boundary, CrossHair + Z3 over the package, the code standards
 pixi run --locked python -m beethoven_qa standards readability --base origin/main   # one group
 pixi run hooks            # the pre-push hook runs the same gate before anything leaves the machine
 ```
@@ -31,6 +33,7 @@ python -m beethoven_qa vendor --into <repository> --kit   # from a clean, tagged
 python -m beethoven_qa vendor-check                       # at the consumer's root: the copy and the kit are untouched
                                                           # (`--source <qa>` only from this repository's own environment)
 python -m beethoven_qa gate                               # the consumer's own package, as [tool.beethoven-qa] names it
+python -m beethoven_qa boundary                           # the interface standard's rules, against the copy's manifest
 ```
 
 The Claude Code plugin, on a laptop:

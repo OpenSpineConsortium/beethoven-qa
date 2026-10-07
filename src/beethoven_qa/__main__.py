@@ -1,8 +1,9 @@
-"""The command line: ``python -m beethoven_qa gate | standards | vendor | vendor-check``.
+"""The command line: ``python -m beethoven_qa gate | standards | vendor | vendor-check | boundary``.
 
 Wiring and I/O only, so the gate exempts this module from the contract rule (pyproject.toml); the
-logic it calls lives in contracted, symbolically checked functions of gate.py, vendor.py and the
-standards groups.
+logic it calls lives in contracted, symbolically checked functions of gate.py, vendor.py,
+boundary.py and the standards groups. What a consumer may type is interface/cli.json, the cli
+export; tests/test_interface.py holds this parser to it.
 """
 
 from __future__ import annotations
@@ -10,9 +11,10 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
-from beethoven_qa import __version__, gate, vendor
+from beethoven_qa import __version__, boundary, gate, vendor
 from beethoven_qa.standards import run as standards
 
 
@@ -23,24 +25,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"beethoven-qa {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
-    _gate_parser(
-        sub.add_parser(
-            "gate",
-            help="every public function has contracts, and CrossHair + Z3 find no counterexample",
-        )
-    )
-    _standards_parser(
-        sub.add_parser(
-            "standards",
-            help="the code standards, each group on its own, on the code new since a base commit",
-        )
-    )
-    _vendor_parser(
-        sub.add_parser("vendor", help="write the pinned copy of this checkout into a repository")
-    )
-    _vendor_check_parser(
-        sub.add_parser("vendor-check", help="the copy matches its ORIGIN and the kit is in place")
-    )
+    for name, text, configure in _COMMANDS:
+        configure(sub.add_parser(name, help=text))
     return parser
 
 
@@ -87,27 +73,67 @@ def _vendor_check_parser(c: argparse.ArgumentParser) -> None:
     )
 
 
+def _boundary_parser(b: argparse.ArgumentParser) -> None:
+    b.add_argument("--root", type=Path, default=Path("."), help="repository root (default: .)")
+
+
+# Each command, its help line and what adds its arguments, in the order --help lists them.
+_COMMANDS: tuple[tuple[str, str, Callable[[argparse.ArgumentParser], None]], ...] = (
+    (
+        "gate",
+        "every public function has contracts, and CrossHair + Z3 find no counterexample",
+        _gate_parser,
+    ),
+    (
+        "standards",
+        "the code standards, each group on its own, on the code new since a base commit",
+        _standards_parser,
+    ),
+    ("vendor", "write the pinned copy of this checkout into a repository", _vendor_parser),
+    ("vendor-check", "the copy matches its ORIGIN and the kit is in place", _vendor_check_parser),
+    (
+        "boundary",
+        "the interface standard's rules: a sealed tree, the manifest, pinned imports, the "
+        "published surface, the direction",
+        _boundary_parser,
+    ),
+)
+
+
+def _gate(args: argparse.Namespace) -> int:
+    try:
+        config = gate.GateConfig.from_pyproject(args.root.resolve())
+    except (OSError, ValueError) as exc:  # a missing file, bad TOML, or pydantic's refusal
+        print(f"gate: the [tool.beethoven-qa] table cannot be used: {exc}")
+        return 2
+    if args.module is not None and not args.module.startswith(config.package):
+        print(f"gate: {args.module} is not part of {config.package}")
+        return 2
+    return gate._run(args.root.resolve(), args.module, args.report_all)
+
+
+def _standards(args: argparse.Namespace) -> int:
+    names = list(standards.GROUPS) if args.group == "all" else [args.group]
+    return standards._run(args.root, names, args.base, args.sarif)
+
+
+# The commands that ask git: a git that fails or is missing is exit 2, never a traceback.
+_GIT_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
+    "vendor": lambda args: vendor._sync(args.into, args.kit),
+    "vendor-check": lambda args: vendor._check(args.root, args.source),
+    "boundary": lambda args: boundary._run(args.root),
+}
+
+
 def main(argv: list[str]) -> int:
     args = _parser().parse_args(argv)
     if args.command == "gate":
-        try:
-            config = gate.GateConfig.from_pyproject(args.root.resolve())
-        except (OSError, ValueError) as exc:  # a missing file, bad TOML, or pydantic's refusal
-            print(f"gate: the [tool.beethoven-qa] table cannot be used: {exc}")
-            return 2
-        if args.module is not None and not args.module.startswith(config.package):
-            print(f"gate: {args.module} is not part of {config.package}")
-            return 2
-        return gate._run(args.root.resolve(), args.module, args.report_all)
+        return _gate(args)
     if args.command == "standards":
-        names = list(standards.GROUPS) if args.group == "all" else [args.group]
-        return standards._run(args.root, names, args.base, args.sarif)
+        return _standards(args)
     try:
-        if args.command == "vendor":
-            return vendor._sync(args.into, args.kit)
-        return vendor._check(args.root, args.source)
+        return _GIT_COMMANDS[args.command](args)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        # git itself failed or is missing; a traceback is not an answer.
         print(f"{args.command}: git failed: {exc}")
         return 2
 
