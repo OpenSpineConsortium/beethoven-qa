@@ -61,7 +61,7 @@ Anthropic product; "Claude" and "Claude Code" are Anthropic's marks, used here t
   starts from a file, with no agent, no `eval` and no `vm`.
 - **Nothing is deleted outside a run's own directories and node-local temp.** Never the Claude Code
   login directory, the workspace, another run or anything else under `$HOME`. The pinned-copy
-  command honours it in its own way: it writes only under `vendor/beethoven-qa/` and the four kit
+  command honours it in its own way: it writes only under `vendor/beethoven-qa/` and the five kit
   paths of the repository it is pointed at, refuses to overwrite any file there whose bytes are not
   HEAD's (compared with the commit's own blob, so an ignore rule or an index flag such as
   `--assume-unchanged` cannot hide an edit), and never deletes; a file a new release dropped is
@@ -189,6 +189,25 @@ that states the function's real domain, which no caller ever leaves, is not dodg
 - `beethoven_qa.standards` and `python -m beethoven_qa standards <group>|all [--base <ref>|auto|none]
   [--sarif DIR]`: the code standards (`docs/STANDARDS.md`). Exit 0 when every group asked for
   passed, 1 when one did not, 2 when one could not run.
+- `beethoven_qa.boundary` and `python -m beethoven_qa boundary [--root DIR]` (from 2.0.0): the five
+  rules of the Beethoven interface standard
+  ([INTERFACES.md](https://github.com/OpenSpineConsortium/beethoven/blob/main/INTERFACES.md)) over
+  what git tracks, a lane of this repository's gate and of every consumer's: no file but Markdown
+  reaches another checkout (rule 1); `interface/INTERFACE.json` is in the standard's shape and
+  names every file it exports and every copy carried (2); each copy holds exactly what its ORIGIN
+  lists, and beethoven-qa's own copy is the vendor command's, whose manifest offers what is
+  imported (3); imports of the engine's packages name only the provider's `python` export, read
+  from the manifest in the pinned copy (4); qa <- agents <- research and never back (5). A finding
+  of rule 1 or 4 that must stand is an entry of `[tool.beethoven-qa.boundary]` (file, what
+  matched, why), printed on every run and refused when stale; this repository needs none. Exit 0
+  when the rules hold, 1 on a finding (`file:line: rule N:` and a sentence), 2 when it cannot run.
+- `interface/` (from 2.0.0): this repository's manifest under that standard, `INTERFACE.json`, with
+  `python.json` (the modules and names a consumer may import: `beethoven_qa.contracts` and
+  `__version__`, nothing else) and `cli.json` (the five commands, their options and exit codes,
+  the `[tool.beethoven-qa]` table); exports `python`, `cli`, `kit`, `plugin` (files: Claude Code
+  reads it, nobody runs it) and `docs` (text), each at version 1 (`interface/README.md`). The copy
+  carries it, so a consumer finds it at `vendor/beethoven-qa/interface/`;
+  `tests/test_interface.py` holds it to the code.
 - The repository kit, carried byte for byte by every consumer: `.githooks/pre-push`,
   `.github/workflows/automerge.yml`, `.github/workflows/rulesets.yml`,
   `.claude/hooks/session-start.sh`, `.github/workflows/standards.yml`. Change one here and every
@@ -296,9 +315,10 @@ that states the function's real domain, which no caller ever leaves, is not dodg
 
 ```sh
 pixi install --locked         # reconstruct the exact env from the lock; CI uses --locked too
-pixi run --locked gate        # lint (ruff) + typecheck (mypy strict) + tests (pytest) + symbolic (CrossHair/Z3) + standards
+pixi run --locked gate        # lint (ruff) + typecheck (mypy strict) + tests (pytest) + boundary + symbolic (CrossHair/Z3) + standards
 pixi run --locked symbolic    # just the gate: python -m beethoven_qa gate
 pixi run --locked standards   # the code standards, every group, against where this branch left main
+pixi run --locked boundary    # the interface standard's five rules on this tree
 pixi run --locked python -m beethoven_qa gate --module beethoven_qa.vendor --report-all   # one module
 pixi run hooks                # point git at .githooks (the session-start hook does this in a cloud session)
 ```
@@ -313,9 +333,12 @@ tree with uncommitted or untracked files: commit everything first.
 ## Layout
 
 - `pixi.toml` / `pixi.lock` — the verification stack, pinned for `linux-64`.
-- `src/beethoven_qa/` — `contracts.py`, `gate.py`, `vendor.py`, `example.py`, `__main__.py` (the
-  command line; exempt from the contract rule as wiring and I/O), `standards/` (one module per
-  group; `findings.py`, `newcode.py`, `sarif.py` and `group.py` shared; `run.py` the runner).
+- `interface/` — the manifest of what this repository offers (`INTERFACE.json`, `python.json`,
+  `cli.json`, `README.md`).
+- `src/beethoven_qa/` — `contracts.py`, `gate.py`, `vendor.py`, `boundary.py`, `example.py`,
+  `__main__.py` (the command line; exempt from the contract rule as wiring and I/O), `standards/`
+  (one module per group; `findings.py`, `newcode.py`, `sarif.py` and `group.py` shared; `run.py`
+  the runner).
 - `tests/` — pytest under typeguard's import hook; `test_hooks.py` runs the kit's real pre-push
   hook with a stub pixi, a bare remote and a linked worktree.
 - `plugin/` — the Claude Code plugin; `.claude-plugin/marketplace.json` — the marketplace listing it.

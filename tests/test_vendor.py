@@ -9,6 +9,7 @@ and a dropped file are each caught; and nothing is ever deleted by the command.
 from __future__ import annotations
 
 import importlib.util
+import json
 import marshal
 import os
 import py_compile
@@ -21,7 +22,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from beethoven_qa import vendor
+from beethoven_qa import boundary, vendor
 from beethoven_qa.contracts import ViolationError
 from beethoven_qa.vendor import (
     COPY_ROOTS,
@@ -183,6 +184,7 @@ def test_round_trip_and_tamper(tmp_path: Path) -> None:
     assert origin.commit == _git(src, "rev-parse", "HEAD").strip()
     assert (consumer / VENDOR_DIR / "src/beethoven_qa/gate.py").is_file()
     assert (consumer / VENDOR_DIR / ".claude-plugin/marketplace.json").is_file()
+    assert (consumer / VENDOR_DIR / "interface/INTERFACE.json").is_file()
     assert os.access(consumer / ".githooks/pre-push", os.X_OK)
     assert _check(consumer) == 0
 
@@ -660,3 +662,48 @@ def test_refusals(tmp_path: Path) -> None:
 
 def test_check_without_a_copy(tmp_path: Path) -> None:
     assert _check(_init(tmp_path / "empty")) == 1
+
+
+def test_the_copy_carries_the_manifest_the_boundary_check_reads(tmp_path: Path) -> None:
+    # The consumer's side of the interface standard, end to end: the copy vendor writes holds
+    # interface/, the consumer's own manifest imports from it, and `boundary` reads what the
+    # consumer may import from the copy's manifest. An edit to that manifest is the copy's, so
+    # vendor-check catches it.
+    src = _source(tmp_path)
+    consumer = _init(tmp_path / "consumer")
+    assert _sync(consumer, install_kit=True, source=src) == 0
+    imports = [
+        {
+            "repository": "OpenSpineConsortium/beethoven-qa",
+            "export": export,
+            "version": 1,
+            "into": VENDOR_DIR,
+            "origin": f"{VENDOR_DIR}/{ORIGIN_NAME}",
+        }
+        for export in ("python", "cli", "kit")
+    ]
+    manifest = {
+        "format": 1,
+        "name": "consumer",
+        "repository": "OpenSpineConsortium/consumer",
+        "summary": "a throwaway consumer",
+        "standard": boundary.STANDARD,
+        "exports": [],
+        "imports": imports,
+    }
+    (consumer / "interface").mkdir()
+    (consumer / boundary.MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
+    module = consumer / "src/consumer/__init__.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("from beethoven_qa.contracts import ensure, require\n", encoding="utf-8")
+    _git(consumer, "add", "-A")
+    assert boundary._run(consumer) == 0
+    assert _check(consumer) == 0
+
+    module.write_text("from beethoven_qa.gate import GateConfig\n", encoding="utf-8")
+    _git(consumer, "add", "-A")
+    assert boundary._run(consumer) == 1  # not in the python export the copy's manifest lists
+
+    surface = consumer / VENDOR_DIR / "interface/python.json"
+    surface.write_text(surface.read_text(encoding="utf-8").replace("ensure", "gate"), "utf-8")
+    assert _check(consumer) == 1

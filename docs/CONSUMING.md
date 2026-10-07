@@ -26,7 +26,8 @@ Anthropic's marks, used here to say what it runs.
 - **hpcworker's framework** (Python 3.6 standard library only, for the login node's CentOS 7) and
   **the browser and desktop editions** (TypeScript): the repository half only, the pre-push gate,
   the required check, auto-merge and rulesets as code, with their own language's checks. No copy,
-  no icontract, no new dependency.
+  no icontract, no new dependency. The boundary lane comes with the copy, so these repositories
+  keep their own manifest and check the standard's rules with their own tests.
 
 ## What an adopted repository holds
 
@@ -36,9 +37,11 @@ Anthropic's marks, used here to say what it runs.
   pyproject.toml                    [tool.beethoven-qa] and the tool tables for its own package
   src/<package>/                    its code
   tests/conftest.py                 typeguard's import hook for its package
+  interface/INTERFACE.json          its own manifest: what it offers, and what it takes (step 3)
   vendor/beethoven-qa/              the pinned copy; never edited by hand
     ORIGIN                          where the copy came from and the digest of what it holds
     pyproject.toml  src/beethoven_qa/  plugin/  .claude-plugin/marketplace.json
+    interface/                      beethoven-qa's manifest, which the boundary lane reads
     kit/                            the kit as the release has it, which vendor-check compares
   .githooks/pre-push                kit: the gate before every push
   .github/workflows/automerge.yml   kit: auto-merge armed on every pull request opened ready
@@ -75,10 +78,10 @@ pixi run --locked --manifest-path ../beethoven-qa/pixi.toml python -m beethoven_
 - **`--locked`** takes beethoven-qa's environment from its lock as it is. A re-solve would rewrite
   `pixi.lock`, and the then-dirty checkout would be refused anyway.
 - **What it writes.** Into `vendor/beethoven-qa/`: the files of the release commit under
-  `pyproject.toml`, `src/beethoven_qa/`, `plugin/` and `.claude-plugin/`, read from git's own
-  objects (never the working tree, so no `.pixi/`, no caches, no line-ending conversion and no
-  edit git was told to ignore), each with the mode the commit gives it; the four kit files under
-  `kit/`; and last `ORIGIN`:
+  `pyproject.toml`, `src/beethoven_qa/`, `plugin/`, `.claude-plugin/` and (from 2.0.0)
+  `interface/`, read from git's own objects (never the working tree, so no `.pixi/`, no caches, no
+  line-ending conversion and no edit git was told to ignore), each with the mode the commit gives
+  it; the five kit files under `kit/`; and last `ORIGIN`:
 
   ```
   repository: OpenSpineConsortium/beethoven-qa
@@ -88,7 +91,7 @@ pixi run --locked --manifest-path ../beethoven-qa/pixi.toml python -m beethoven_
   files: <how many files the copy holds, ORIGIN not counted>
   ```
 
-  With `--kit` it also writes the four kit files at their own paths in the consumer, with the
+  With `--kit` it also writes the five kit files at their own paths in the consumer, with the
   executable bit the commit gives them; without it the live kit files are left as they are, and
   `vendor-check` fails while one is missing or differs. The copy is itself a plugin marketplace (its
   `.claude-plugin/marketplace.json` lists `./plugin`), which is what step 7's image registers.
@@ -129,7 +132,7 @@ copy, its ORIGIN and the kit files together, the message naming the release.
 
 The same verification stack as beethoven-qa's own `pixi.toml` (copy its dependency lines; they are
 repeated here as they stand at 2.0.0, but `jsonschema`, which only beethoven-qa's own tests use),
-the repository's own dependencies beside them, the copy on `PYTHONPATH`, and the six lanes of the
+the repository's own dependencies beside them, the copy on `PYTHONPATH`, and the seven lanes of the
 gate:
 
 ```toml
@@ -177,7 +180,8 @@ test = "pytest -q"
 symbolic = "python -m beethoven_qa gate"
 standards = "python -m beethoven_qa standards all"
 vendor-check = "python -m beethoven_qa vendor-check"
-gate = { depends-on = ["lint", "typecheck", "test", "symbolic", "standards", "vendor-check"] }
+boundary = "python -m beethoven_qa boundary"
+gate = { depends-on = ["lint", "typecheck", "test", "boundary", "symbolic", "standards", "vendor-check"] }
 hooks = "git config core.hooksPath .githooks"
 ```
 
@@ -241,6 +245,22 @@ repository loosens them), and blocks only what the change made: the findings the
 holds are reported and pass. Its coverage group runs the repository's tests a second time, under
 coverage.py, as `pytest` from the root with the repository's own pytest settings.
 
+The boundary lane checks the five rules of the Beethoven interface standard
+([INTERFACES.md](https://github.com/OpenSpineConsortium/beethoven/blob/main/INTERFACES.md)) on the
+files git tracks, with no network: no file but Markdown reaches another checkout (`../<repo>`, a
+path built from a parent and a repository's name, a checkout variable such as
+`HPCWORKER_DIR`, a submodule, a dependency by git URL or by a path outside the tree, a clone of one
+of the organisation's repositories, a workflow step that checks another repository out); the
+repository's own `interface/INTERFACE.json` exists in the standard's shape and names every file it
+exports and every pinned copy it carries; each copy holds exactly what its `ORIGIN` lists, byte for
+byte; Python imports of `beethoven_qa`, `beethoven_agents` and `beethoven_research` name only what
+the provider's `python` export lists, read from the provider's manifest in this repository's pinned
+copy of it; and they go one way, beethoven-qa <- beethoven-agents <- beethoven-research. It reads
+beethoven-qa's own manifest in `vendor/beethoven-qa/interface/`, which is why it needs a copy of
+2.0.0 or later, and leaves the copy's files to `vendor-check`. Exit 0 when the rules hold, 1 with
+each finding as `file:line: rule N:` and a sentence, 2 when it cannot run (not the root of a git
+checkout, or a `[tool.beethoven-qa]` table it cannot use). Step 3 says what the manifest holds.
+
 ## 3. `pyproject.toml`: the gate's table and the tools
 
 ```toml
@@ -288,6 +308,57 @@ other key is accepted. The gate imports every module
 of the package to find its functions, so a module that does work at import time does it during the
 gate, and one that calls `sys.exit` at import fails it: guard a command line's call with
 `if __name__ == "__main__":`.
+
+### `interface/INTERFACE.json` and the boundary table
+
+The boundary lane reads the repository's own manifest, `interface/INTERFACE.json`, in the shape the
+standard gives: what the repository offers (its `exports`, each with an integer `version` and the
+files it covers) and what it takes, one entry per export of another repository it carries. A
+consumer of the copy names beethoven-qa's exports it takes, all into `vendor/beethoven-qa`, with
+the copy's own `ORIGIN` as the record (a research-pipeline repository that imports the contract
+decorators, runs the commands, carries the kit and registers the plugin):
+
+```json
+{
+  "format": 1,
+  "name": "<repo>",
+  "repository": "OpenSpineConsortium/<repo>",
+  "summary": "<one sentence>",
+  "standard": "https://github.com/OpenSpineConsortium/beethoven/blob/main/INTERFACES.md",
+  "exports": [],
+  "imports": [
+    {"repository": "OpenSpineConsortium/beethoven-qa", "export": "python", "version": 1,
+     "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"},
+    {"repository": "OpenSpineConsortium/beethoven-qa", "export": "cli", "version": 1,
+     "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"},
+    {"repository": "OpenSpineConsortium/beethoven-qa", "export": "kit", "version": 1,
+     "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"},
+    {"repository": "OpenSpineConsortium/beethoven-qa", "export": "plugin", "version": 1,
+     "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"}
+  ]
+}
+```
+
+What beethoven-qa offers is its own manifest, which the copy carries
+(`vendor/beethoven-qa/interface/INTERFACE.json`, explained in `interface/README.md` there): `python`
+(`beethoven_qa.contracts` and `beethoven_qa.__version__`, nothing else of the package), `cli` (the
+five commands, their options and exit codes, and this table), `kit`, `plugin`, and `docs`, the two
+documents, which the copy does not carry and an import of which the lane refuses. An import of
+beethoven-qa into any other folder, or of an export or version the copy's manifest does not offer,
+is a finding of rule 3. Which exports a repository takes is the person's to write; the lane checks
+that each one is there, and that the code imports nothing the `python` export does not list.
+
+A finding of rule 1 or rule 4 that must stand for now (a test that still reads a sibling checkout
+until the provider publishes what it needs, say) is named in a table of its own, each entry a file,
+what matched there, and why:
+
+```toml
+[tool.beethoven-qa.boundary]
+"tests/test_profiles.py" = { "HPCWORKER_DIR" = "compares the copy with a sibling checkout on a maintainer's machine; goes when the provider's export is pulled" }
+```
+
+The lane prints every entry on every run, refuses one that no longer matches anything, and never
+excuses rules 2, 3 or 5. beethoven-qa itself needs no entry.
 
 Two things measured on 2026-10-04 that a consumer meets at once:
 
@@ -357,6 +428,8 @@ jobs:
         run: pixi install --locked
       - name: the pinned copy of beethoven-qa matches its ORIGIN, and the kit is in place
         run: pixi run --locked vendor-check
+      - name: the interface standard's rules (boundary)
+        run: pixi run --locked boundary
       - name: lint
         run: pixi run --locked lint
       - name: typecheck
@@ -576,7 +649,12 @@ dialog, which a cloud session never shows; no thread has tried it.
    `permissions: contents: read` and actions pinned to a commit, or the supply-chain group reports
    them (as findings the old workflows held, they pass, but any line the change touches is new).
    The rule is applied by the next daily run of `rulesets.yml` after the merge, or by hand with
-   "Run workflow".
+   "Run workflow". 2.0.0 is also the first release with the `boundary` command and with
+   `interface/` in the copy: write the repository's own `interface/INTERFACE.json` and, if it
+   needs one, the `[tool.beethoven-qa.boundary]` table (step 3), add the `boundary` task to the
+   gate (step 2) and its step to the CI gate lane (step 5), and run `pixi run --locked boundary`
+   until it says the rules hold. A copy of 1.0.0 carries no manifest, so the lane says to take
+   2.0.0.
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
    old and the new release; then a pull request, ready for review, which merges when the gate is
    green. A red gate after an update is reported red and fixed at its cause, in the consumer's code
@@ -616,6 +694,9 @@ dialog, which a cloud session never shows; no thread has tried it.
   excludes `vendor`, `typecheck` names `src`, the typeguard hook names the consumer's package, and
   `exempt` cannot name the copy. The copy is held to all of these by beethoven-qa's own gate, which
   a commit clears before it reaches `main` and a tag.
+- **Importing what the `python` export does not list**, such as `beethoven_qa.gate` or
+  `beethoven_qa.vendor`: those are run through the commands, and can change inside a release. The
+  boundary lane refuses the import with its file and line.
 - **Skipping `vendor-check`.** It is a lane of `pixi run --locked gate` and a step of the CI gate lane.
   `SKIP_GATE=1` skips the pre-push gate only knowingly, with the reason in the commit; it also skips
   the hook's own checks (that the pushed ref is HEAD and the tree clean), so such a push is unproven
@@ -637,3 +718,6 @@ dialog, which a cloud session never shows; no thread has tried it.
   beethoven-research's, which ran there; the `vendor-check` step and the longer check name have not.
 - The standards workflow and its required check on GitHub, in beethoven-qa or in a consumer, and the
   standards lane over a consumer's package and tests (beethoven-agents' 277 tests under coverage).
+- The boundary lane in a real consumer: it ran in throwaway consumers written by the tests
+  (`tests/test_boundary.py`, `tests/test_vendor.py`) and on beethoven-qa itself, and in no
+  consumer's gate or CI yet.

@@ -8,8 +8,8 @@ export const meta = {
   ],
 }
 // The shape the workflows page calls "keep fixing until a check passes", for any repository that
-// defines a pixi `gate` task (beethoven-qa's own: lint, typecheck, test, symbolic, standards; a
-// consuming repository adds vendor-check). Written in beethoven-research on 2026-10-04 and moved into the
+// defines a pixi `gate` task (beethoven-qa's own: lint, typecheck, test, boundary, symbolic,
+// standards; a consuming repository adds vendor-check). Written in beethoven-research on 2026-10-04 and moved into the
 // beethoven-qa plugin at the split. One fixer at a time, in this checkout: parallel fixers would edit
 // the same files. Never skips, disables or weakens a test, a contract or a symbolic bound, and never
 // re-solves the lock: every gate runs `pixi run --locked`, which refuses a drifted manifest instead
@@ -36,11 +36,11 @@ const GATE = {
         type: 'object',
         required: ['lane', 'ids', 'summary'],
         properties: {
-          lane: { type: 'string', description: 'the failing pixi task, such as lock, lint, typecheck, test, symbolic, standards or vendor-check' },
+          lane: { type: 'string', description: 'the failing pixi task, such as lock, lint, typecheck, test, boundary, symbolic, standards or vendor-check' },
           ids: {
             type: 'array',
             items: { type: 'string' },
-            description: 'what failed, copied verbatim from the tool, one per entry: a pytest node id (tests/test_x.py::test_y), the file:line and code of a ruff or mypy finding, the CrossHair target and file:line of a counterexample, the path vendor-check names; never prose, never a duration or a count',
+            description: 'what failed, copied verbatim from the tool, one per entry: a pytest node id (tests/test_x.py::test_y), the file:line and code of a ruff or mypy finding, the CrossHair target and file:line of a counterexample, the path vendor-check names, the file:line and rule of a boundary finding; never prose, never a duration or a count',
           },
           summary: { type: 'string', description: 'one paragraph: what failed and where' },
           excerpt: { type: 'string', description: 'the decisive lines of output, verbatim' },

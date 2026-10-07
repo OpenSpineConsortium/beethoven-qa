@@ -75,6 +75,10 @@ symbolic = "python -m beethoven_qa gate"
 # The code standards, each group on its own (docs/STANDARDS.md), on the code new since where this
 # branch left the remote's default branch; CI runs each group as its own job (standards.yml).
 standards = "python -m beethoven_qa standards all"
-gate = { depends-on = ["lint", "typecheck", "test", "symbolic", "standards"] }
+# The interface standard's five rules (interface/README.md): no file of this tree reaches another
+# checkout, interface/INTERFACE.json says what this repository offers, and whatever it takes from
+# another is a pinned copy with its ORIGIN. It reads what git tracks and needs no network.
+boundary = "python -m beethoven_qa boundary"
+gate = { depends-on = ["lint", "typecheck", "test", "boundary", "symbolic", "standards"] }
 # The gate before every push, not only in CI: one command points git at the repository's hooks.
 hooks = "git config core.hooksPath .githooks"

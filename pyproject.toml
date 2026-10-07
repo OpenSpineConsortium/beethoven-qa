@@ -13,6 +13,7 @@ dependencies = [
   "icontract>=2.6",
   "pydantic>=2",
   "beartype>=0.18",
+  "pyyaml>=6",  # the supply-chain group and the boundary check read workflow files
 ]
 
 [tool.pytest.ini_options]
