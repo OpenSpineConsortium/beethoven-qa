@@ -3,7 +3,9 @@
 CrossHair proves the pure parts (a safe path never leaves its directory; the digest is a sha256;
 the stale list is exactly what the release dropped). These tests run the whole round trip in
 throwaway git checkouts: a copy is written, recorded and checked; a hand edit, a missing kit file
-and a dropped file are each caught; and nothing is ever deleted by the command.
+and a dropped file are each caught; and nothing is ever deleted by the command. vendor reads the
+release from GitHub through `gh`; here `gh` is tests/fake_gh.py, which answers from the throwaway
+checkout ``_source`` makes, so the real calls run and nothing leaves the machine.
 """
 
 from __future__ import annotations
@@ -43,6 +45,21 @@ from beethoven_qa.vendor import (
 
 REPO = Path(__file__).resolve().parent.parent
 H = "a" * 64
+
+
+@pytest.fixture(autouse=True)
+def github(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # GitHub, as far as vendor can tell: a `gh` first on PATH that answers from tmp_path / "qa",
+    # where every test's ``_source`` makes beethoven-qa. Returns the folder that holds it.
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    gh = folder / "gh"
+    fake = Path(__file__).resolve().parent / "fake_gh.py"
+    gh.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{fake}" "$@"\n', encoding="utf-8")
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_GH_REPO", str(tmp_path / "qa"))
+    return folder
 
 
 def _env(**extra: str) -> dict[str, str]:
@@ -109,13 +126,14 @@ def _run_line(consumer: Path, line: str) -> subprocess.CompletedProcess[str]:
 
 def _init(path: Path) -> Path:
     path.mkdir(parents=True)
-    _git(path, "init", "-q")
+    _git(path, "init", "-q", "-b", "main")
     return path
 
 
 def _source(tmp_path: Path) -> Path:
-    # A throwaway beethoven-qa checkout holding exactly what a copy is taken from, committed and
-    # tagged, so the test never depends on the state of the checkout it runs in.
+    # A throwaway beethoven-qa holding exactly what a copy is taken from, committed on main and
+    # tagged, so the test never depends on the state of the checkout it runs in; the fake gh
+    # serves it as GitHub.
     src = _init(tmp_path / "qa")
     for rel in COPY_ROOTS + KIT:
         origin = REPO / rel
@@ -178,7 +196,7 @@ def test_origin_round_trip_and_boundary() -> None:
 def test_round_trip_and_tamper(tmp_path: Path) -> None:
     src = _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="v1.0.0") == 0
     origin = Origin.parse((consumer / VENDOR_DIR / ORIGIN_NAME).read_text(encoding="utf-8"))
     assert origin.ref == "v1.0.0"
     assert origin.commit == _git(src, "rev-parse", "HEAD").strip()
@@ -200,11 +218,11 @@ def test_round_trip_and_tamper(tmp_path: Path) -> None:
 
 
 def test_kit_is_checked(tmp_path: Path) -> None:
-    src = _source(tmp_path)
+    _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=False, source=src) == 0
+    assert _sync(consumer, install_kit=False, ref="main") == 0
     assert _check(consumer) == 1  # the kit is not in place
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     assert _check(consumer) == 0
     (consumer / KIT[1]).write_text("name: drifted\n", encoding="utf-8")
     assert _check(consumer) == 1
@@ -213,13 +231,13 @@ def test_kit_is_checked(tmp_path: Path) -> None:
 def test_a_dropped_file_is_listed_never_deleted(tmp_path: Path) -> None:
     src = _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     _git(consumer, "add", "-A")
     _git(consumer, "commit", "-q", "-m", "vendor beethoven-qa v1.0.0")
 
     _git(src, "rm", "-q", "src/beethoven_qa/example.py")
     _git(src, "commit", "-q", "-m", "drop the example")
-    assert _sync(consumer, install_kit=True, source=src) == 1
+    assert _sync(consumer, install_kit=True, ref="main") == 1
     dropped = consumer / VENDOR_DIR / "src/beethoven_qa/example.py"
     assert dropped.is_file()  # listed for a reviewed commit, not removed
     assert _check(consumer) == 1
@@ -235,7 +253,7 @@ def test_the_printed_line_removes_a_dropped_file(
     # any git (2.55 refuses `git add -u` on a folder it does not track yet; 2.43 did not).
     src = _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     if first_copy != "untracked":
         _git(consumer, "add", "-A")
     if first_copy == "committed":
@@ -243,7 +261,7 @@ def test_the_printed_line_removes_a_dropped_file(
     _git(src, "rm", "-q", "src/beethoven_qa/example.py")
     _git(src, "commit", "-q", "-m", "drop the example")
     capsys.readouterr()
-    assert _sync(consumer, install_kit=True, source=src) == 1
+    assert _sync(consumer, install_kit=True, ref="main") == 1
     done = _run_line(consumer, _printed_line(capsys.readouterr().out))
     assert done.returncode == 0, done.stderr
     dropped = f"{VENDOR_DIR}/src/beethoven_qa/example.py"
@@ -261,7 +279,7 @@ def _committed_link(consumer: Path, link: str, target: str) -> None:
 
 
 def test_links_on_the_way_are_refused_before_anything_is_written(tmp_path: Path) -> None:
-    src = _source(tmp_path)
+    _source(tmp_path)
     # ORIGIN itself a committed link out of the consumer, live and dangling.
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -269,12 +287,12 @@ def test_links_on_the_way_are_refused_before_anything_is_written(tmp_path: Path)
     victim.write_text("important\n", encoding="utf-8")
     consumer = _init(tmp_path / "c1")
     _committed_link(consumer, f"{VENDOR_DIR}/ORIGIN", str(victim))
-    assert _sync(consumer, install_kit=False, source=src) == 2
+    assert _sync(consumer, install_kit=False, ref="main") == 2
     assert victim.read_text(encoding="utf-8") == "important\n"
     assert not (consumer / VENDOR_DIR / "pyproject.toml").exists()
     consumer = _init(tmp_path / "c2")
     _committed_link(consumer, f"{VENDOR_DIR}/ORIGIN", str(outside / "absent.txt"))
-    assert _sync(consumer, install_kit=False, source=src) == 2
+    assert _sync(consumer, install_kit=False, ref="main") == 2
     assert not (outside / "absent.txt").exists()
 
     # The copy's directory a link onto the consumer's own root, with unsaved work there.
@@ -282,20 +300,20 @@ def test_links_on_the_way_are_refused_before_anything_is_written(tmp_path: Path)
     (consumer / "pyproject.toml").write_text("mine\n", encoding="utf-8")
     _committed_link(consumer, VENDOR_DIR, "..")
     (consumer / "pyproject.toml").write_text("mine, edited\n", encoding="utf-8")
-    assert _sync(consumer, install_kit=False, source=src) == 2
+    assert _sync(consumer, install_kit=False, ref="main") == 2
     assert (consumer / "pyproject.toml").read_text(encoding="utf-8") == "mine, edited\n"
 
     # A kit file's directory a link elsewhere in the consumer.
     consumer = _init(tmp_path / "c4")
     (consumer / "shared" / "github" / "workflows").mkdir(parents=True)
     _committed_link(consumer, ".github", "shared/github")
-    assert _sync(consumer, install_kit=True, source=src) == 2
+    assert _sync(consumer, install_kit=True, ref="main") == 2
     assert not (consumer / "shared/github/workflows/automerge.yml").exists()
     assert not (consumer / VENDOR_DIR).exists()
 
 
 def test_unsaved_files_git_status_would_hide_are_kept(tmp_path: Path) -> None:
-    src = _source(tmp_path)
+    _source(tmp_path)
     mine = "#!/bin/sh\necho mine\n"
     # Ignored by the consumer's .gitignore.
     consumer = _init(tmp_path / "c1")
@@ -303,7 +321,7 @@ def test_unsaved_files_git_status_would_hide_are_kept(tmp_path: Path) -> None:
     hook = consumer / ".claude/hooks/session-start.sh"
     hook.parent.mkdir(parents=True)
     hook.write_text(mine, encoding="utf-8")
-    assert _sync(consumer, install_kit=True, source=src) == 2
+    assert _sync(consumer, install_kit=True, ref="main") == 2
     assert hook.read_text(encoding="utf-8") == mine
     # Hidden by status.showUntrackedFiles=no.
     consumer = _init(tmp_path / "c2")
@@ -311,17 +329,19 @@ def test_unsaved_files_git_status_would_hide_are_kept(tmp_path: Path) -> None:
     hook = consumer / ".githooks/pre-push"
     hook.parent.mkdir(parents=True)
     hook.write_text(mine, encoding="utf-8")
-    assert _sync(consumer, install_kit=True, source=src) == 2
+    assert _sync(consumer, install_kit=True, ref="main") == 2
     assert hook.read_text(encoding="utf-8") == mine
 
 
-def test_the_copy_is_of_the_commit_not_the_working_tree(tmp_path: Path) -> None:
+def test_the_copy_is_of_the_commit_not_a_working_tree(tmp_path: Path) -> None:
+    # What GitHub holds is commits; an edit in a checkout of beethoven-qa, even one git is told to
+    # overlook, never reaches a copy.
     src = _source(tmp_path)
     gate = src / "src/beethoven_qa/gate.py"
     _git(src, "update-index", "--assume-unchanged", "src/beethoven_qa/gate.py")
     gate.write_text(gate.read_text(encoding="utf-8") + "\n# not committed\n", encoding="utf-8")
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=False, source=src) == 0
+    assert _sync(consumer, install_kit=False, ref="main") == 0
     copied = (consumer / VENDOR_DIR / "src/beethoven_qa/gate.py").read_text(encoding="utf-8")
     assert copied == _git(src, "show", "HEAD:src/beethoven_qa/gate.py")
 
@@ -329,7 +349,7 @@ def test_the_copy_is_of_the_commit_not_the_working_tree(tmp_path: Path) -> None:
 def test_a_release_that_turns_a_file_into_a_directory_is_refused_first(tmp_path: Path) -> None:
     src = _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     _git(consumer, "add", "-A")
     _git(consumer, "commit", "-q", "-m", "vendor v1")
     before = (consumer / VENDOR_DIR / ORIGIN_NAME).read_text(encoding="utf-8")
@@ -340,14 +360,14 @@ def test_a_release_that_turns_a_file_into_a_directory_is_refused_first(tmp_path:
     (stream / "AGENT.md").write_bytes(body)
     _git(src, "add", "-A")
     _git(src, "commit", "-q", "-m", "a file becomes a directory")
-    assert _sync(consumer, install_kit=True, source=src) == 2
+    assert _sync(consumer, install_kit=True, ref="main") == 2
     assert (consumer / VENDOR_DIR / ORIGIN_NAME).read_text(encoding="utf-8") == before
 
 
 def test_check_sees_links_caches_and_the_executable_bit(tmp_path: Path) -> None:
-    src = _source(tmp_path)
+    _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     assert _check(consumer) == 0
     extra = tmp_path / "elsewhere"
     extra.mkdir()
@@ -371,7 +391,7 @@ def test_a_rewritten_origin_is_caught_only_against_the_source(tmp_path: Path) ->
     # the check against a beethoven-qa checkout, run from that checkout's own code, catches it.
     src = _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     anchored = _vendor_check(src / "src", consumer, "--source", str(src))
     assert anchored.returncode == 0 and "and the commit it names" in anchored.stdout
     target = consumer / VENDOR_DIR / "src/beethoven_qa/gate.py"
@@ -393,7 +413,7 @@ def test_the_anchored_check_runs_only_from_the_checkout_it_is_given(tmp_path: Pa
     # untouched. The anchored form therefore runs only from the source checkout's own code.
     src = _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     assert _check(consumer, source=src) == 1  # this process runs REPO's code, not src's
     copy = consumer / VENDOR_DIR / "src"
     refused = _vendor_check(copy, consumer, "--source", str(src))
@@ -411,10 +431,8 @@ def test_the_anchored_check_runs_only_from_the_checkout_it_is_given(tmp_path: Pa
     assert _vendor_check(copy, consumer, "--source", str(src)).returncode == 0
     assert _vendor_check(src / "src", consumer).returncode == 1
     assert _vendor_check(src / "src", consumer, "--source", str(src)).returncode == 1
-    # The checks above ran Python on the checkout's own src/; a byte-code cache written there
-    # would make the checkout dirty and refuse the next copy taken from it.
+    # The checks above ran Python on the checkout's own src/ and wrote nothing there.
     assert _git(src, "status", "--porcelain", "--untracked-files=all") == ""
-    assert _sync(_init(tmp_path / "another"), install_kit=True, source=src) == 0
 
 
 def test_a_package_that_shadows_the_copy_is_refused(tmp_path: Path) -> None:
@@ -423,7 +441,7 @@ def test_a_package_that_shadows_the_copy_is_refused(tmp_path: Path) -> None:
     # is not edited says so; an edited one is seen by neither form, the limit vendor.py states.
     src = _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     shutil.copytree(src / "src/beethoven_qa", consumer / "src/beethoven_qa")
     own = f"{consumer / 'src'}{os.pathsep}{consumer / VENDOR_DIR / 'src'}"
     shadowed = _vendor_check(own, consumer)
@@ -465,7 +483,7 @@ def test_configuration_given_to_git_does_not_reach_the_tests(
     src = _source(tmp_path)
     assert _git(src, "cat-file", "-t", "v1.0.0") == "commit\n"  # lightweight, as written
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     assert _check(consumer) == 0
 
 
@@ -496,7 +514,7 @@ def test_a_repository_named_in_the_environment_is_never_touched(
 
     src = _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     assert _check(consumer) == 0
     _git(consumer, "add", "-A")
     _git(consumer, "commit", "-q", "-m", "vendor v1.0.0")
@@ -506,7 +524,7 @@ def test_a_repository_named_in_the_environment_is_never_touched(
     _git(src, "rm", "-q", "src/beethoven_qa/example.py")
     _git(src, "commit", "-q", "-m", "drop the example")
     capsys.readouterr()
-    assert _sync(consumer, install_kit=True, source=src) == 1
+    assert _sync(consumer, install_kit=True, ref="main") == 1
     done = _run_line(consumer, _printed_line(capsys.readouterr().out))
     assert done.returncode == 0, done.stderr
     assert _git(consumer, "ls-files", "--", f"{VENDOR_DIR}/src/beethoven_qa/example.py") == ""
@@ -534,9 +552,9 @@ def test_the_developers_git_configuration_does_not_reach_the_tests(
 def test_an_edit_behind_an_index_flag_is_kept(tmp_path: Path, flag: str) -> None:
     # The usual way to keep a local edit to a tracked file: git then reports the file unchanged,
     # and the bytes on disk are not the commit's.
-    src = _source(tmp_path)
+    _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     _git(consumer, "add", "-A")
     _git(consumer, "commit", "-q", "-m", "vendor v1.0.0")
     mine = "#!/bin/sh\necho MY UNCOMMITTED WORK\n"
@@ -545,7 +563,7 @@ def test_an_edit_behind_an_index_flag_is_kept(tmp_path: Path, flag: str) -> None
         _git(consumer, "update-index", flag, "--", rel)
         (consumer / rel).write_text(mine, encoding="utf-8")
     assert _git(consumer, "status", "--porcelain") == ""  # what git says of it
-    assert _sync(consumer, install_kit=True, source=src) == 2
+    assert _sync(consumer, install_kit=True, ref="main") == 2
     for rel in kept:
         assert (consumer / rel).read_text(encoding="utf-8") == mine
 
@@ -570,9 +588,9 @@ def _forged(code: Path) -> bool:
 
 
 def test_a_byte_code_cache_that_carries_code_is_caught(tmp_path: Path) -> None:
-    src = _source(tmp_path)
+    _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     _git(consumer, "add", "-A")
     _git(consumer, "commit", "-q", "-m", "vendor v1.0.0")
     code = consumer / VENDOR_DIR / "src"
@@ -603,10 +621,10 @@ def test_a_hook_git_records_without_the_executable_bit_is_caught(tmp_path: Path)
     # A checkout whose file system git does not trust for modes (WSL on /mnt/c, NTFS) commits a
     # new 0755 hook as 100644; every clone then has a hook git skips, and the live file and the
     # copy's agree with each other, both without the bit.
-    src = _source(tmp_path)
+    _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
     _git(consumer, "config", "core.fileMode", "false")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     _git(consumer, "add", "-A")
     _git(consumer, "commit", "-q", "-m", "vendor v1.0.0")
     assert _git(consumer, "ls-files", "-s", "--", KIT_EXECUTABLE[0]).startswith("100644 ")
@@ -627,37 +645,146 @@ def test_the_mode_is_set_on_the_open_descriptor(
     # glibc before 2.32 refuses fchmodat(AT_SYMLINK_NOFOLLOW) with ENOTSUP, which CPython raises as
     # NotImplementedError, not an OSError: a path-based chmod stopped vendor after its first file,
     # with a traceback and exit 1, the code for "files dropped".
-    src = _source(tmp_path)
+    _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
 
     def unsupported(*args: object, **kwargs: object) -> None:
         raise NotImplementedError("chmod: follow_symlinks unavailable on this platform")
 
     monkeypatch.setattr(os, "chmod", unsupported)
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     assert (consumer / KIT_EXECUTABLE[0]).stat().st_mode & 0o777 == 0o755
     assert (consumer / VENDOR_DIR / "pyproject.toml").stat().st_mode & 0o777 == 0o644
     monkeypatch.setattr(os, "fchmod", unsupported)
-    assert _sync(consumer, install_kit=True, source=src) == 3
+    assert _sync(consumer, install_kit=True, ref="main") == 3
 
 
-def test_refusals(tmp_path: Path) -> None:
+def test_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     src = _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    (src / "untracked.txt").write_text("dirty\n", encoding="utf-8")
-    assert _sync(consumer, install_kit=False, source=src) == 2  # a copy is of a commit
-    (src / "untracked.txt").unlink()
+    assert _sync(consumer / "not-a-root", install_kit=False, ref="main") == 2
+    # Never into the beethoven-qa checkout this command runs from (here, src stands in for it).
+    with monkeypatch.context() as patched:
+        patched.setattr(vendor, "_source_root", lambda: src)
+        assert _sync(src, install_kit=False, ref="main") == 2
+    assert not (src / VENDOR_DIR).exists()
 
-    assert _sync(consumer / "not-a-root", install_kit=False, source=src) == 2
-    assert _sync(src, install_kit=False, source=src) == 2  # never into itself
-
-    assert _sync(consumer, install_kit=False, source=src) == 0
+    assert _sync(consumer, install_kit=False, ref="main") == 0
     _git(consumer, "add", "-A")
     _git(consumer, "commit", "-q", "-m", "vendor")
     edited = consumer / VENDOR_DIR / "pyproject.toml"
     edited.write_text("edited\n", encoding="utf-8")
-    assert _sync(consumer, install_kit=False, source=src) == 2  # would overwrite uncommitted work
+    assert _sync(consumer, install_kit=False, ref="main") == 2  # would overwrite uncommitted work
     assert edited.read_text(encoding="utf-8") == "edited\n"
+
+
+def _nothing_written(consumer: Path) -> bool:
+    return not (consumer / VENDOR_DIR).exists() and not (consumer / KIT[0]).exists()
+
+
+def test_only_a_merged_commit_is_taken(tmp_path: Path) -> None:
+    # A commit on a branch the default branch does not contain (a pull request's) is refused, as
+    # is a ref GitHub does not know; a commit main contains is taken, by its id, as untagged.
+    src = _source(tmp_path)
+    released = _git(src, "rev-parse", "HEAD").strip()
+    _git(src, "checkout", "-q", "-b", "proposal")
+    (src / "plugin/extra.md").write_text("not merged\n", encoding="utf-8")
+    _git(src, "add", "-A")
+    _git(src, "commit", "-q", "-m", "a proposal")
+    consumer = _init(tmp_path / "consumer")
+    for ref in ("proposal", _git(src, "rev-parse", "HEAD").strip(), "v9.0.0", "../../user"):
+        assert _sync(consumer, install_kit=True, ref=ref) == 2, ref
+        assert _nothing_written(consumer)
+    _git(src, "checkout", "-q", "main")
+    _git(src, "commit", "-q", "--allow-empty", "-m", "after the release")
+    assert _sync(consumer, install_kit=True, ref=released) == 0
+    origin = Origin.parse((consumer / VENDOR_DIR / ORIGIN_NAME).read_text(encoding="utf-8"))
+    assert (origin.ref, origin.commit) == ("untagged", released)
+    assert not (consumer / VENDOR_DIR / "plugin/extra.md").exists()
+
+
+def test_an_annotated_tag_is_recorded_by_its_name(tmp_path: Path) -> None:
+    # A release made on GitHub's page is a lightweight tag; one made with `git tag -a` names a tag
+    # object, which names the commit.
+    src = _source(tmp_path)
+    _git(src, "tag", "-a", "v2.0.0", "-m", "the second release")
+    consumer = _init(tmp_path / "consumer")
+    assert _sync(consumer, install_kit=True, ref="v2.0.0") == 0
+    origin = Origin.parse((consumer / VENDOR_DIR / ORIGIN_NAME).read_text(encoding="utf-8"))
+    assert (origin.ref, origin.commit) == ("v2.0.0", _git(src, "rev-parse", "HEAD").strip())
+    assert _check(consumer) == 0
+
+
+def test_what_github_sends_is_checked_before_anything_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, github: Path
+) -> None:
+    src = _source(tmp_path)
+    consumer = _init(tmp_path / "consumer")
+    # Bytes that are not the blob the commit's tree names.
+    oid = _git(src, "rev-parse", "HEAD:src/beethoven_qa/gate.py").strip()
+    monkeypatch.setenv("FAKE_GH_TAMPER", oid)
+    assert _sync(consumer, install_kit=True, ref="v1.0.0") == 2
+    assert _nothing_written(consumer)
+    monkeypatch.delenv("FAKE_GH_TAMPER")
+    # A listing GitHub cut short.
+    monkeypatch.setenv("FAKE_GH_TRUNCATED", "1")
+    assert _sync(consumer, install_kit=True, ref="v1.0.0") == 2
+    assert _nothing_written(consumer)
+    monkeypatch.delenv("FAKE_GH_TRUNCATED")
+    # An answer that is not the shape GitHub documents.
+    (github / "gh").write_text("#!/bin/sh\necho '{}'\n", encoding="utf-8")
+    assert _sync(consumer, install_kit=True, ref="v1.0.0") == 2
+    # No gh at all.
+    monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
+    assert _sync(consumer, install_kit=True, ref="v1.0.0") == 2
+    assert _nothing_written(consumer)
+
+
+def test_a_link_or_a_missing_kit_file_in_the_release_is_refused(tmp_path: Path) -> None:
+    src = _source(tmp_path)
+    (src / "plugin/skills/elsewhere").symlink_to("/etc")
+    _git(src, "add", "-A")
+    _git(src, "commit", "-q", "-m", "a link")
+    consumer = _init(tmp_path / "consumer")
+    assert _sync(consumer, install_kit=True, ref="main") == 2
+    _git(src, "rm", "-q", "plugin/skills/elsewhere", KIT[1])
+    _git(src, "commit", "-q", "-m", "a kit file goes")
+    assert _sync(consumer, install_kit=True, ref="main") == 2
+    assert _nothing_written(consumer)
+
+
+def test_the_next_release_is_taken_by_the_consumers_own_copy(tmp_path: Path) -> None:
+    # The usual way after the first copy: the consumer's environment runs its pinned copy, which
+    # takes the next release from GitHub, with no checkout of beethoven-qa anywhere.
+    src = _source(tmp_path)
+    consumer = _init(tmp_path / "consumer")
+    assert _sync(consumer, install_kit=True, ref="v1.0.0") == 0
+    _git(consumer, "add", "-A")
+    _git(consumer, "commit", "-q", "-m", "vendor beethoven-qa v1.0.0")
+    (src / "plugin/NEXT.md").write_text("in the next release\n", encoding="utf-8")
+    _git(src, "add", "-A")
+    _git(src, "commit", "-q", "-m", "the next release")
+    _git(src, "tag", "v2.0.0")
+    copy = consumer / VENDOR_DIR / "src"
+    argv = ["vendor", "--into", str(consumer), "--ref", "v2.0.0", "--kit"]
+    taken = subprocess.run(
+        [sys.executable, "-m", "beethoven_qa", *argv],
+        cwd=tmp_path,
+        env=_env(PYTHONPATH=str(copy)),
+        capture_output=True,
+        text=True,
+    )
+    assert taken.returncode == 0, taken.stdout + taken.stderr
+    assert "read from GitHub" in taken.stdout
+    assert (consumer / VENDOR_DIR / "plugin/NEXT.md").is_file()
+    assert _vendor_check(copy, consumer).returncode == 0
+    without = subprocess.run(
+        [sys.executable, "-m", "beethoven_qa", *argv[:4]],
+        env=_env(PYTHONPATH=str(copy)),
+        capture_output=True,
+        text=True,
+    )
+    assert without.returncode == 2 and "--ref" in without.stderr  # the release is always named
 
 
 def test_check_without_a_copy(tmp_path: Path) -> None:
@@ -669,18 +796,18 @@ def test_the_copy_carries_the_manifest_the_boundary_check_reads(tmp_path: Path) 
     # interface/, the consumer's own manifest imports from it, and `boundary` reads what the
     # consumer may import from the copy's manifest. An edit to that manifest is the copy's, so
     # vendor-check catches it.
-    src = _source(tmp_path)
+    _source(tmp_path)
     consumer = _init(tmp_path / "consumer")
-    assert _sync(consumer, install_kit=True, source=src) == 0
+    assert _sync(consumer, install_kit=True, ref="main") == 0
     imports = [
         {
             "repository": "OpenSpineConsortium/beethoven-qa",
             "export": export,
-            "version": 1,
+            "version": version,
             "into": VENDOR_DIR,
             "origin": f"{VENDOR_DIR}/{ORIGIN_NAME}",
         }
-        for export in ("python", "cli", "kit")
+        for export, version in (("python", 1), ("cli", 2), ("kit", 1))
     ]
     manifest = {
         "format": 1,
