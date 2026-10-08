@@ -100,6 +100,20 @@
     "1": "a finding, each printed as file:line, the rule and what to do; or a known exception that matches nothing any more",
     "2": "could not run: not the root of a git checkout, a pyproject.toml or [tool.beethoven-qa] table that cannot be read, or git failed"
    }
+  },
+  "report": {
+   "summary": "the evidence report (docs/REPORT.md): every lane the gate runs (the tasks lint, typecheck, test, boundary, symbolic and standards of pixi.toml, and vendor-check when the pinned copy is there), each command as its own process in the environment the command was started in, the standards lane given --sarif; writes report.md and report.json with the repository, the lock's versions and each tool's own, every lane's argv, exit code, wall time and output file, the gate's counts, each standards group's SARIF counts, the enforcement facts, who decides each verdict, where a language model is involved, and what the report does not show",
+   "arguments": {},
+   "options": {
+    "--root": "DIR: the repository root (default: .)",
+    "--out": "DIR: where report.md, report.json, lanes/<task>-<n>.txt and sarif/<group>.sarif are written (default: ./report)"
+   },
+   "environment": {},
+   "exit": {
+    "0": "every lane passed",
+    "1": "a lane failed; the report is written and says which",
+    "2": "cannot run: no pyproject.toml, no git, or pixi.toml lacks one of the lane tasks"
+   }
   }
  },
  "configuration": {

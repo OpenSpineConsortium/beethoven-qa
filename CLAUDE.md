@@ -216,6 +216,19 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   of rule 1 or 4 that must stand is an entry of `[tool.beethoven-qa.boundary]` (file, what
   matched, why), printed on every run and refused when stale; this repository needs none. Exit 0
   when the rules hold, 1 on a finding (`file:line: rule N:` and a sentence), 2 when it cannot run.
+- `beethoven_qa.report` and `python -m beethoven_qa report [--root DIR] [--out DIR]` (from
+  5.0.0; `docs/REPORT.md`): the evidence report a person hands to anyone who doubts code written
+  by an AI. It runs every lane the gate runs, read from `pixi.toml`'s `[tasks]` (lint, typecheck,
+  test, boundary, symbolic, standards, and vendor-check where the pinned copy is), each command
+  as its own process in the environment it was started in, the standards lane given `--sarif`,
+  and writes `report.md` and `report.json` with the repository, the lock's versions beside each
+  tool's own `--version`, every lane's argv, exit code, wall time and output file, the gate's
+  counts (per target, the totals, the unproven list), each standards group's SARIF counts by
+  level and state, the enforcement facts (`core.hooksPath`, the hook's command, the ruleset's
+  required checks, the workflows' jobs), who decides each verdict, where a language model is
+  involved and what the report does not show. Exit 0, 1 (a lane failed; the report still
+  written) or 2 (cannot run). `pixi run --locked report`; CI's job `report (evidence)` keeps the
+  folder as an artifact and is not a required check.
 - `interface/` (from 2.0.0): this repository's manifest under that standard, `INTERFACE.json`, with
   `python.json` (the modules and names a consumer may import: `beethoven_qa.contracts` and
   `__version__`, nothing else) and `cli.json` (the five commands, their options and exit codes,
@@ -335,6 +348,7 @@ pixi run --locked gate        # lint (ruff) + typecheck (mypy strict) + tests (p
 pixi run --locked symbolic    # just the gate: python -m beethoven_qa gate
 pixi run --locked standards   # the code standards, every group, against where this branch left main
 pixi run --locked boundary    # the interface standard's five rules on this tree
+pixi run --locked report      # the evidence report into ./report (docs/REPORT.md): every lane again, about twenty minutes
 pixi run --locked python -m beethoven_qa gate --module beethoven_qa.vendor --report-all   # one module
 pixi run hooks                # point git at .githooks (the session-start hook does this in a cloud session)
 ```
@@ -354,7 +368,7 @@ tree with uncommitted or untracked files: commit everything first.
 - `src/beethoven_qa/` — `contracts.py`, `gate.py`, `vendor.py`, `boundary.py`, `example.py`,
   `__main__.py` (the command line; exempt from the contract rule as wiring and I/O), `standards/`
   (one module per group; `findings.py`, `newcode.py`, `sarif.py` and `group.py` shared; `run.py`
-  the runner).
+  the runner), `report.py` (the evidence report, `docs/REPORT.md`).
 - `tests/` — pytest under typeguard's import hook; `test_hooks.py` runs the kit's real pre-push
   hook with a stub pixi, a bare remote and a linked worktree.
 - `plugin/` — the Claude Code plugin (`hooks/` holds the coaching hook); `.claude-plugin/marketplace.json` — the marketplace listing it.
@@ -363,7 +377,7 @@ tree with uncommitted or untracked files: commit everything first.
   module loading, `new.target`, both grammars); `tools/check_workflows.test.mjs` — its tests, and
   the workflow scripts' control flow under stand-in hooks (`node --test
   tools/check_workflows.test.mjs`).
-- `docs/` — `CONSUMING.md`, `STANDARDS.md`, `PARALLEL_BUILD.md`.
+- `docs/` — `CONSUMING.md`, `STANDARDS.md`, `REPORT.md`, `PARALLEL_BUILD.md`.
 - `tests/data/` — the OASIS SARIF 2.1.0 schema every standards log is validated against, with its
   source in `tests/data/README.md`.
 - `.githooks/`, `.github/`, `.claude/` — the kit, the CI lanes, the rule as code, session settings.

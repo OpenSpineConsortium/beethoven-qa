@@ -2,8 +2,8 @@ name: ci
 # The definition of done for beethoven-qa itself, and for the plugin it ships. No job holds a secret
 # and none reaches a university's cluster: GitHub's runners cannot (the university's own sign-in
 # stands between, at Wayne State a VPN and a one-time code), and tokens never enter a repository
-# (CLAUDE.md). The two job names are the required checks in .github/rulesets/main.json; renaming
-# a job means changing that file in the same pull request.
+# (CLAUDE.md). The gate and plugin job names are the required checks in .github/rulesets/main.json;
+# renaming either means changing that file in the same pull request. The report job is not one.
 on:
   push:
     branches: [main]
@@ -82,3 +82,36 @@ jobs:
         # Node's own test runner: the checker against scripts it must refuse and accept, and the
         # three workflow scripts run under stand-in hooks, with no agent started.
         run: node --test tools/check_workflows.test.mjs
+
+  report:
+    # The evidence report (docs/REPORT.md): every lane the gate runs, each command as its own
+    # process, with the gate's counts, the standards' SARIF logs and the enforcement facts, written
+    # for anyone who doubts code written by an AI. Not a required check: the gate job decides, and
+    # this job's artifact is what a reader opens; its exit code says the same as the lanes'.
+    name: report (evidence)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The standards lane reads the base commit's objects to tell an old finding from a new one.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: install pixi
+        run: |
+          curl -fsSL -o /usr/local/bin/pixi \
+            "https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl"
+          chmod 0755 /usr/local/bin/pixi
+          pixi --version
+      - name: reconstruct the environment from the lock
+        run: pixi install --locked
+      - name: the evidence report
+        run: pixi run --locked report
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-report
+          path: report/
+          if-no-files-found: ignore
+          retention-days: 30

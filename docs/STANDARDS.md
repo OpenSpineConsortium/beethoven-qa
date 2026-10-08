@@ -97,7 +97,8 @@ them. In CI the kit's `.github/workflows/standards.yml` runs one job per group (
 that one is the required check in `.github/rulesets/main.json`, so a group added in a later release
 needs no change to the rule. The SARIF logs are kept as artifacts of the run for 30 days. Nothing
 is uploaded to GitHub's code scanning: on a private repository it needs GitHub Code Security, which
-is not bought.
+is not bought. The evidence report (`docs/REPORT.md`) runs the `standards` task with `--sarif`
+and counts each log's results by level and by `baselineState`, beside the tools the log names.
 
 ## For a session writing code
 

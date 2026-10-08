@@ -88,5 +88,9 @@ standards = "python -m beethoven_qa standards all"
 # another is a pinned copy with its ORIGIN. It reads what git tracks and needs no network.
 boundary = "python -m beethoven_qa boundary"
 gate = { depends-on = ["lint", "typecheck", "test", "boundary", "symbolic", "standards"] }
+# The evidence report (docs/REPORT.md): the lanes above, each command as its own process, written
+# up with who decided each verdict, for anyone who doubts code written by an AI. Not a lane of the
+# gate, which it would only run twice; CI keeps its output as an artifact.
+report = "python -m beethoven_qa report"
 # The gate before every push, not only in CI: one command points git at the repository's hooks.
 hooks = "git config core.hooksPath .githooks"

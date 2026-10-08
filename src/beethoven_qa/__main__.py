@@ -1,10 +1,10 @@
 """The command line: ``python -m beethoven_qa gate | standards | coach | vendor | vendor-check |
-boundary``.
+boundary | report``.
 
 Wiring and I/O only, so the gate exempts this module from the contract rule (pyproject.toml); the
 logic it calls lives in contracted, symbolically checked functions of gate.py, vendor.py,
-boundary.py and the standards groups. What a consumer may type is interface/cli.json, the cli
-export; tests/test_interface.py holds this parser to it.
+boundary.py, report.py and the standards groups. What a consumer may type is interface/cli.json,
+the cli export; tests/test_interface.py holds this parser to it.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from beethoven_qa import __version__, boundary, gate, vendor
+from beethoven_qa import __version__, boundary, gate, report, vendor
 from beethoven_qa.standards import coach
 from beethoven_qa.standards import run as standards
 
@@ -88,6 +88,17 @@ def _boundary_parser(b: argparse.ArgumentParser) -> None:
     b.add_argument("--root", type=Path, default=Path("."), help="repository root (default: .)")
 
 
+def _report_parser(r: argparse.ArgumentParser) -> None:
+    r.add_argument("--root", type=Path, default=Path("."), help="repository root (default: .)")
+    r.add_argument(
+        "--out",
+        type=Path,
+        default=Path("report"),
+        help="where report.md, report.json, every lane's output and the SARIF logs are written "
+        "(default: ./report)",
+    )
+
+
 # Each command, its help line and what adds its arguments, in the order --help lists them.
 _COMMANDS: tuple[tuple[str, str, Callable[[argparse.ArgumentParser], None]], ...] = (
     (
@@ -117,6 +128,12 @@ _COMMANDS: tuple[tuple[str, str, Callable[[argparse.ArgumentParser], None]], ...
         "the interface standard's rules: a sealed tree, the manifest, pinned imports, the "
         "published surface, the direction",
         _boundary_parser,
+    ),
+    (
+        "report",
+        "the evidence report: every lane of the gate run as its own process and written up, with "
+        "who decided each verdict, for anyone who doubts code written by an AI",
+        _report_parser,
     ),
 )
 
@@ -163,6 +180,8 @@ def main(argv: list[str]) -> int:
         return _standards(args)
     if args.command == "coach":
         return _coach(args)
+    if args.command == "report":
+        return report._run(args.root, args.out)
     try:
         return _GIT_COMMANDS[args.command](args)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
