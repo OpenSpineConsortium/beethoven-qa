@@ -121,7 +121,8 @@ No module is done, and the gate will not let it enter a run or reach `main`, unt
 
 Beside the definition of done, which says whether code is correct, six groups say whether a person
 can read it, change it and trust what built it: **readability** (cognitive complexity 15,
-cyclomatic 10, 4 parameters, 25 lines of code), **design** (the Chidamber and Kemerer suite with
+cyclomatic 10, 4 parameters, 25 lines of code in the body, which is 26 as lizard's NLOC with the
+`def` line), **design** (the Chidamber and Kemerer suite with
 LCOM4), **duplication** and **coverage** (SonarSource's Sonar way conditions on new code: at most 3%
 duplicated, at least 80% covered), **security** (bandit, each finding with its CWE) and **supply
 chain** (OpenSSF Scorecard's checks of the workflow files). Each is a module of

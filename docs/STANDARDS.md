@@ -21,7 +21,7 @@ Anthropic's marks, used here to say what it runs.
 
 | Group | What blocks a change | Limit and where it comes from | Tool (from the lock) |
 | - | - | - | - |
-| `readability` | a function over a limit | cognitive complexity 15 (Campbell, SonarSource S3776); cyclomatic complexity 10 (McCabe, 1976); 4 parameters, `self` and `cls` not counted, and 25 lines of code in a body (Code Climate's defaults) | complexipy, ruff (C901, PLR0913), and a count of lines of code here |
+| `readability` | a function over a limit | cognitive complexity 15 (Campbell, SonarSource S3776); cyclomatic complexity 10 (McCabe, 1976); 4 parameters, `self` and `cls` not counted, and 25 lines of code in a body (Code Climate's defaults), which is 26 as lizard counts them (its NLOC takes the `def` line and each line of the signature with the body) | complexipy, ruff (C901, PLR0913) and lizard (NLOC) |
 | `design` | a class over a limit | WMC 50, NOC 10, RFC 50 (chosen here); DIT 5 (the Drive file); CBO 14 (Sahraoui, Boukadoum and Lounis, 2000); LCOM4 1 (Hitz and Montazeri, 1995) | the Chidamber and Kemerer suite computed here from the syntax tree, McCabe weights from radon |
 | `duplication` | more than 3% of the new lines in a copied block | Sonar way: duplicated lines on new code at most 3%; a block is 10 lines and 100 tokens | a token-level detector here |
 | `coverage` | less than 80% of the new lines that can run are run by the tests | Sonar way: coverage on new code at least 80% (line coverage) | coverage.py over the repository's own tests |
@@ -185,6 +185,70 @@ bandit 1.9.4, coverage.py 7.16.2, ruff 0.16.10, CrossHair 0.0.111, git 2.43.
 - The hook script was broken on purpose before its tests were trusted: without `|| exit 0` an
   older copy's argparse refusal (exit 2) came through, and with the last test inverted an empty
   answer printed an empty line; the tests failed on each (`tests/test_coach_hook.py`).
+- On 2026-10-08, lizard 1.24.1 (pinned beside jscpd and zizmor) took over the lines of code per
+  function from the count the group made itself out of the tokens. lizard's start line is the
+  `def` line for a decorated function (the decorators above it not counted) and for a signature
+  over several lines alike, the line the syntax tree gives, so each of its rows is matched by file
+  and start line and anchored by the tree's qualified name (lizard's own name has no class and
+  reads `outer.inner` for a nested function); the anchors did not change, and old findings still
+  match. Its NLOC counts the `def` line, each further line of the signature and every line of a
+  multi-line string or a bracketed expression, and leaves out the docstring, comments, blank lines
+  and the body of a nested function, whose `def` line it counts in the function around it. Over
+  this package's 256 functions at ddd8c19, NLOC was the body count plus one for 235 of them; the 21
+  others differ by the signature's lines (`sig`, the `def` line included) and the nested bodies
+  left out (`nest`), NLOC = body + sig − nest in every case:
+
+  | function | body | NLOC | sig | nest |
+  | - | -: | -: | -: | -: |
+  | `boundary.compare_copy` | 6 | 9 | 3 | 0 |
+  | `boundary.unpublished` | 11 | 14 | 3 | 0 |
+  | `boundary.stale_exceptions` | 1 | 4 | 3 | 0 |
+  | `boundary._off_surface` | 13 | 16 | 3 | 0 |
+  | `gate.crosshair_command` | 10 | 13 | 3 | 0 |
+  | `gate.set_aside` | 9 | 12 | 3 | 0 |
+  | `gate._modules` | 43 | 34 | 1 | 10 |
+  | `gate._run` | 102 | 101 | 1 | 2 |
+  | `standards.coverage.new_line_coverage` | 1 | 4 | 3 | 0 |
+  | `standards.coverage._tally` | 11 | 14 | 3 | 0 |
+  | `standards.design._components` | 12 | 10 | 1 | 3 |
+  | `standards.duplication.repeated` | 6 | 9 | 3 | 0 |
+  | `standards.duplication._marked` | 7 | 10 | 3 | 0 |
+  | `standards.findings.over_limit` | 14 | 17 | 3 | 0 |
+  | `standards.group._definitions` | 15 | 9 | 1 | 7 |
+  | `standards.group._compare` | 3 | 6 | 3 | 0 |
+  | `standards.newcode._unquote` | 10 | 7 | 1 | 4 |
+  | `standards.readability._defs` | 3 | 6 | 3 | 0 |
+  | `standards.readability._check` | 23 | 20 | 1 | 4 |
+  | `vendor._write_copy` | 17 | 23 | 6 | 0 |
+  | `vendor._preflight` | 24 | 31 | 7 | 0 |
+
+  The limit is therefore 26 in NLOC, the Drive file's 25 lines in the body and one for the `def`
+  line, and a signature over several lines spends part of the 25: `vendor._preflight`, 24 lines of
+  body under a 7-line signature, is the one old finding this added (15 where there were 14, all
+  unchanged). The readability group took 2.0 s before and 2.2 to 2.4 s after; lizard runs twice,
+  at the head and at the base, 0.3 s each with its interpreter's start. The oracle for a plain
+  body of N statements, where the two counts must agree, is the old count kept in
+  `tests/test_standards_groups.py` (`body_length` in the module is its definition).
+- What lizard 1.24.1 does not do, and how the group answers (measured the same day, from its
+  `PythonIndents.set_nesting` and `FileInfoBuilder.end_of_function`). A function written on its
+  `def` line (`def f(x): return x`, or with the body on the line that closes the parameters) never
+  gets the deeper-indented line lizard waits for and is not listed; it holds one line of code and
+  the group leaves it. lizard's own `#lizard forgive` comment drops the function it closes (the
+  one before it, not the one after), and a comment holding `GENERATED CODE` drops the rest of the
+  file, which this module's own comments did when they named the two phrases and had to be
+  reworded (a string literal is no comment to lizard); a function the syntax tree has, whose body
+  begins on a line of its own and which lizard leaves out, is refused by name and the group does
+  not run, since nothing in a repository's files may loosen a limit. Any line after the
+  parameters' `)` at the `def`'s indentation or less whose first token is not a `)` ends the
+  function to lizard: a return annotation over several lines (`-> dict[`, `str, int`, `]:`), which
+  ruff format does write for a long one, left a function of 30 lines listed with 2, and a dedented
+  continuation line does the same; such a function is refused by name and line rather than counted
+  short. A multi-line string is one token and its lines at column 0 do no such thing. lizard's
+  `whitelizard.txt` filters its warnings only, never its CSV, and is looked for in the working
+  directory, which is empty; a file given by name is read with or without `.gitignore`
+  (`--no-gitignore` is passed all the same); its exit code is 0 under `--csv` whatever its own
+  thresholds see; a module with a syntax error is listed as one function to its end, and the tree
+  has no function at that line, so nothing is recorded for it, as before.
 
 ## Not yet measured
 

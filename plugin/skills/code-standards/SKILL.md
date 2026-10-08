@@ -16,7 +16,7 @@ release).
 
 | Group | Limit |
 | - | - |
-| readability | cognitive complexity at most 15; cyclomatic complexity at most 10; at most 4 parameters (`self` and `cls` not counted); at most 25 lines of code in a function body (docstring, comments and blank lines not counted) |
+| readability | cognitive complexity at most 15; cyclomatic complexity at most 10; at most 4 parameters (`self` and `cls` not counted); at most 25 lines of code in a function body, which is 26 as lizard counts them (its NLOC takes the `def` line and each line of the signature with the body; docstring, comments and blank lines not counted; a nested function is measured on its own, and only its `def` line counts in the function around it) |
 | design | per class: LCOM4 at most 1 (instance methods all joined through shared attributes of `self` or calls), DIT at most 5, CBO at most 14, WMC at most 50, RFC at most 50, NOC at most 10 |
 | duplication | at most 3% of the new lines inside a block of 10 lines and 100 tokens that occurs elsewhere in the package |
 | coverage | the tests run at least 80% of the new lines that can run |

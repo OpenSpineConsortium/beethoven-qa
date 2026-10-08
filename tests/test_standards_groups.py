@@ -9,12 +9,14 @@ SARIF logs checked, every log against the OASIS schema.
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
 import subprocess
 import tempfile
 import textwrap
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -156,6 +158,7 @@ def test_a_new_function_over_a_limit_blocks_whatever_its_comments_say(tmp_path: 
     loose = f"[tool.ruff.lint.mccabe]\nmax-complexity = 50\n[tool.complexipy]{cx}"
     ruff = '[lint]\nignore = ["C901", "PLR0913"]\nexclude = ["src/pkg/new.py"]\n'
     files = {"ruff.toml": ruff, "complexipy.toml": cx, f"{PKG}/.complexipy.toml": cx}
+    files["whitelizard.txt"] = "long\n"  # lizard's whitelist, looked for in the working directory
     root = _repo(tmp_path, files, extra_toml=loose)
     params = "def many(a, b, c, d, e):\n    return a\n\n\n"
     params += "class K:\n    def m(self, a, b, c, d):\n        return a\n"
@@ -183,6 +186,151 @@ def test_the_base_is_read_from_git_not_from_its_export_attributes(tmp_path: Path
     root = _repo(tmp_path, {f"{PKG}/legacy.py": TANGLED, **attributes})
     _write(root, {f"{PKG}/fresh.py": "X = 1\n"})
     assert _check(root, "readability").passed
+
+
+LENGTH = readability.LENGTH
+
+
+# The count readability.py made itself before lizard, kept as the oracle lizard's NLOC is held to
+# where the two must agree: a plain body of N statements is N lines of code, N + 1 with the def.
+
+
+def _code_lines(source: str) -> frozenset[int]:
+    skip = {tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT}
+    skip |= {tokenize.ENCODING, tokenize.ENDMARKER}
+    lines: set[int] = set()
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type not in skip:
+            lines.update(range(tok.start[0], tok.end[0] + 1))
+    return frozenset(lines)
+
+
+def _first_statement(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    body = node.body
+    docstring = (
+        isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    )
+    rest = body[1:] if docstring else body
+    return rest[0].lineno if rest else (node.end_lineno or node.lineno) + 1
+
+
+def _home_made(source: str) -> dict[int, int]:
+    # Each function's body length by its def line, as the group counted it before lizard.
+    code = _code_lines(source)
+    found = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            last = node.end_lineno or node.lineno
+            found[node.lineno] = readability.body_length(code, _first_statement(node), last)
+    return found
+
+
+def _statements(n: int, indent: str = "    ") -> str:
+    return "".join(f"{indent}x{i} = {i}\n" for i in range(n))
+
+
+def _lengths(report: Report) -> dict[str, tuple[int, str]]:
+    # Each function-length finding's anchor, with its value and its state against the base.
+    pairs = (zip(r.findings, r.states, strict=True) for r in report.runs)
+    return {f.anchor: (f.value, s) for pair in pairs for f, s in pair if f.rule == LENGTH}
+
+
+def test_twenty_five_lines_of_body_pass_and_twenty_six_fail(tmp_path: Path) -> None:
+    # The Drive file's 25 lines in the body are 26 of lizard's NLOC, which counts the def line.
+    root = _repo(tmp_path, {})
+    full, over = "def full():\n" + _statements(25), "def over():\n" + _statements(26)
+    _write(root, {f"{PKG}/new.py": full + "\n\n" + over})
+    report = _check(root, "readability")
+    assert _blocked(report) == {(LENGTH, "over")} and _lengths(report) == {"over": (27, "new")}
+    said = "`over`: its length in lines of code (the def line counted) is 27, more than 26"
+    assert [f.message for f in report.blocking] == [said]
+
+
+def test_length_findings_are_anchored_by_qualified_name(tmp_path: Path) -> None:
+    # lizard names a method without its class and a nested function outer.inner; the anchors are
+    # the syntax tree's, as before lizard, so old findings still match. A nested function's body
+    # is its own, not the body of the function around it, whose def line alone counts there.
+    method = "class K:\n    def m(self):\n" + _statements(26, " " * 8)
+    nested = "def outer():\n    def inner():\n" + _statements(26, " " * 8) + "    return inner()\n"
+    root = _repo(tmp_path, {})
+    _write(root, {f"{PKG}/new.py": method + "\n\n" + nested})
+    report = _check(root, "readability")
+    assert _blocked(report) == {(LENGTH, "K.m"), (LENGTH, "outer.inner")}
+    assert _lengths(report) == {"K.m": (27, "new"), "outer.inner": (27, "new")}
+
+
+def test_decorators_are_not_counted_and_the_lines_of_a_signature_are(tmp_path: Path) -> None:
+    # lizard starts a function at its def line, below any decorator, and counts each line of a
+    # signature spread over several with the body: 1 + 3 + 23 = 27 is over, 1 + 3 + 22 = 26 is
+    # not. A docstring, a comment and a blank line are not lines of code to it.
+    decorated = "@functools.lru_cache\n@functools.wraps(len)\ndef decorated():\n" + _statements(25)
+    spread = "def spread(\n    a,\n    b,\n):\n" + _statements(23)
+    documented = 'def documented(a):\n    """Three lines\n\n    of docstring."""\n'
+    documented += "    # a comment\n\n" + _statements(25)
+    root = _repo(tmp_path, {})
+    module = "import functools\n\n\n" + "\n\n".join((decorated, spread, documented))
+    _write(root, {f"{PKG}/new.py": module})
+    report = _check(root, "readability")
+    assert _blocked(report) == {(LENGTH, "spread")} and _lengths(report) == {"spread": (27, "new")}
+    _write(root, {f"{PKG}/new.py": module.replace(_statements(23), _statements(22))})
+    assert _check(root, "readability").passed
+
+
+def test_lizard_agrees_with_the_count_it_replaced_on_plain_bodies(tmp_path: Path) -> None:
+    # On a plain body of N statements the two counts agree, lizard's one more for the def line:
+    # here a function, an async function, a method and a nested function, for seven N. The
+    # function around the nested one is the documented exception: its def line, the nested def
+    # line and its return are 3, whatever N, where the count it replaced took the nested body too.
+    parts = []
+    for n in (1, 2, 5, 24, 25, 26, 40):
+        parts.append(f"def f{n}():\n" + _statements(n))
+        parts.append(f"async def a{n}():\n" + _statements(n))
+        parts.append(f"class C{n}:\n    def m(self):\n" + _statements(n, " " * 8))
+        inner = "    def inner():\n" + _statements(n, " " * 8) + "    return inner\n"
+        parts.append(f"def o{n}():\n" + inner)
+    source, rel = "\n\n".join(parts), f"{PKG}/plain.py"
+    _write(tmp_path, {rel: source})
+    measured = readability._lizard(tmp_path, [rel])
+    home = _home_made(source)
+    assert len(measured) == 7 * 5 == len(home)
+    for m in measured:
+        if m.name.startswith("o") and "." not in m.name:
+            assert m.value == 3 and home[m.line] == int(m.name[1:]) + 2, m.name
+        else:
+            assert m.value == home[m.line] + 1, m.name
+
+
+def test_what_lizard_leaves_out_or_would_cut_short(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A function written on its def line is not listed by lizard and holds one line of code: no
+    # finding and no refusal, as for a module that does not parse (lizard lists a function there,
+    # the syntax tree has none at its line). lizard's forgiveness comment, its generated-code
+    # marker and a line at the def's indentation after the parameters (a return annotation over
+    # several lines, which lizard takes for the function's end) are refused by name instead:
+    # nothing in the repository's files loosens the limit, and no short count is recorded.
+    fine = "def one(a): return a\n\n\ndef two(\n    a,\n): return a\n\n\n"
+    files = {f"{PKG}/fine.py": fine + "def three(a):\n    return a\n"}
+    files[f"{PKG}/broken.py"] = "def broken(a:\n    return a\n"
+    _write(tmp_path, files)
+    assert [m.name for m in readability._lizard(tmp_path, sorted(files))] == ["three"]
+    root = _repo(tmp_path, {})
+    forgiven = "def hidden(a):\n    return a\n\n\n#lizard forgive\ndef kept(a):\n    return a\n"
+    generated = "# GENERATED CODE\ndef gone(a):\n    return a\n"
+    annotated = "def cut(a) -> dict[\n    str, int\n]:\n" + _statements(30)
+    refused = {
+        "`hidden` is not listed": forgiven,
+        "`gone` is not listed": generated,
+        "`cut` has a line at its def's indentation \\(line 3\\)": annotated,
+    }
+    for said, text in refused.items():
+        _write(root, {f"{PKG}/new.py": text})
+        with pytest.raises(RuntimeError, match=f"cannot trust {PKG}/new.py: {said}"):
+            _check(root, "readability")
+    assert main(["standards", "readability", "--root", str(root), "--base", "HEAD"]) == 2
+    assert "readability: could not run: the length check cannot trust" in capsys.readouterr().out
 
 
 # --- design -------------------------------------------------------------------------------------
