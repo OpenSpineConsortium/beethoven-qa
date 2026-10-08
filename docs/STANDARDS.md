@@ -26,7 +26,7 @@ Anthropic's marks, used here to say what it runs.
 | `duplication` | more than 3% of the new lines in a copied block, or a comment holding `jscpd:ignore` | Sonar way: duplicated lines on new code at most 3%; a block is 10 lines (SonarSource's own) holding 40 of jscpd's tokens (derived below) | jscpd |
 | `coverage` | less than 80% of the new lines that can run are run by the tests | Sonar way: coverage on new code at least 80% (line coverage) | coverage.py over the repository's own tests |
 | `security` | a new weakness of medium or high severity found with medium or high confidence | Sonar way: no new vulnerability; each finding carries its CWE (the catalogue ISO/IEC 5055 builds on) | bandit |
-| `supply-chain` | a workflow that breaks one of OpenSSF Scorecard's file checks | Pinned-Dependencies (actions by full commit, no download piped into a shell), Token-Permissions (top-level permissions grant no write), Dangerous-Workflow (no checkout of a pull request's code under `pull_request_target` or `workflow_run`, no outsider-controlled expression in a `run` script) | a reader of `.github/workflows/*.yml` here |
+| `supply-chain` | a workflow that breaks one of OpenSSF Scorecard's file checks, or gets a High or Medium finding from zizmor | Pinned-Dependencies (actions by full commit, no download piped into a shell, no download that the step runs, installs, unpacks or chmods without a sha256 check), Token-Permissions (top-level permissions grant no write), Dangerous-Workflow (no checkout of a pull request's code under `pull_request_target` or `workflow_run`, no outsider-controlled expression in a `run` script); zizmor's audits at its regular persona (its Low and Informational findings are recorded, never blocking) | a reader of `.github/workflows/*.yml` here, and zizmor |
 
 Each module's docstring gives the exact definitions (what a line of code is, which methods LCOM4
 joins, which GitHub contexts are untrusted) and every limit's source.
@@ -85,11 +85,14 @@ line, and their suppression comments are not honoured: ruff `--isolated --ignore
 configuration file of its own whose exclusion pattern matches nothing (so `# pragma: no cover`
 leaves no line out), jscpd over a staged copy of the package's files in which its `jscpd:ignore`
 marker is defused, since it has no flag to ignore the marker and reads it wherever the text stands
-(a string literal and a docstring among the places); a comment holding the marker is an error
-finding of its own rule, `duplication/ignore-marker`, and a string holding it is not. A `# noqa`,
-a `# nosec`, a `# jscpd:ignore-start`, a `.bandit` file, a `ruff.toml`, a `.jscpd.json`, a
-`[tool.complexipy]` table or a `complexipy.toml` changes nothing (`tests/test_standards_groups.py`
-pins each). There is no `[tool.beethoven-qa]` key for the standards: a limit changes only in a
+(a string literal and a docstring among the places; a comment holding the marker is an error
+finding of its own rule, `duplication/ignore-marker`, and a string holding it is not), zizmor
+`--no-ignores --no-config` (an inline `# zizmor: ignore[...]` is reported like any other finding,
+and a `zizmor.yml` or `.github/zizmor.yml`, which could also loosen an audit's policy, is never
+read). A `# noqa`, a `# nosec`, a `# jscpd:ignore-start`, a `.bandit` file, a `ruff.toml`, a
+`.jscpd.json`, a `[tool.complexipy]` table, a `complexipy.toml` or a zizmor ignore changes nothing
+(`tests/test_standards_groups.py` pins each). There is no `[tool.beethoven-qa]` key for the
+standards: a limit changes only in a
 release of beethoven-qa, reviewed like any other change. The coverage group runs the repository's
 tests as the repository runs them (`pytest` from its root, its own pytest settings); if they fail
 under coverage, the group fails and says so.
@@ -115,10 +118,26 @@ The `gate` task runs `standards` after the other lanes, so the pre-push hook hol
 them. In CI the kit's `.github/workflows/standards.yml` runs one job per group (`standards /
 <group>`) and one job, `standards (every group green)`, which is green only when every group's is:
 that one is the required check in `.github/rulesets/main.json`, so a group added in a later release
-needs no change to the rule. The SARIF logs are kept as artifacts of the run for 30 days. Nothing
-is uploaded to GitHub's code scanning: on a private repository it needs GitHub Code Security, which
-is not bought. The evidence report (`docs/REPORT.md`) runs the `standards` task with `--sarif`
-and counts each log's results by level and by `baselineState`, beside the tools the log names.
+needs no change to the rule. The SARIF logs are kept as artifacts of the run for 30 days (the
+supply-chain log holds two runs, the reader's and zizmor's). Nothing is uploaded to GitHub's code
+scanning: on a private repository it needs GitHub Code Security, which is not bought. The evidence
+report (`docs/REPORT.md`) runs the `standards` task with `--sarif` and counts each log's results
+by level and by `baselineState`, beside the tools the log names.
+
+The same file has one job more, `scorecard (report)`, which runs OpenSSF Scorecard 5.5.0 over the
+checked-out tree (`--local`), prints the scores in its log and keeps the JSON as an artifact. It is
+not among the jobs the required check waits for and the ruleset does not name it: it reports, and
+blocks nothing. Why only a report: Scorecard scores whatever we do the two things this repository
+accepts with open eyes, the `npm install -g` of the Claude Code CLI, which has no lockfile to pin
+it (Pinned-Dependencies 8 of 10 on 2026-10-08, the one warning), and the pixi download-then-run,
+which the reader now holds to a digest check where a digest exists (pixi publishes none, so the
+digest is this repository's own measurement, written beside the download); and most of its other
+file checks look for what this repository does not have by design (a licence file on a private
+repository, a Dependabot configuration, a SAST service, fuzzing, a security policy, a publishing
+workflow). The checks that ask GitHub's API (Branch-Protection, CI-Tests, CII-Best-Practices,
+Code-Review, Contributors, Maintained, Signed-Releases) refuse a local tree and are not run. The
+job installs no pixi environment: Binary-Artifacts counts the environment's binaries as artifacts
+of the repository (measured 2026-10-08).
 
 ## For a session writing code
 
@@ -160,7 +179,7 @@ hooks unless the plugin is force-enabled in the managed `enabledPlugins` (the ho
 - **Scorecard's other checks** (branch protection, code review, signed releases, a security policy
   and others) read GitHub's settings, not files. This project requires no human review by design
   (greg, 2026-10-04: the checks alone decide); its branch rule is code in
-  `.github/rulesets/main.json`.
+  `.github/rulesets/main.json`. Scorecard itself runs in CI as a report only ("Running it" above).
 - **SonarQube, Code Climate and GitHub Advanced Security** are services, paid or hosted, and need a
   token; this repository holds none. Their published conditions are applied here with open tools.
 - **Nesting depth and boolean-expression limits** exist in ruff only as preview rules, which change
@@ -206,6 +225,30 @@ bandit 1.9.4, coverage.py 7.16.2, ruff 0.16.10, CrossHair 0.0.111, git 2.43.
 - The hook script was broken on purpose before its tests were trusted: without `|| exit 0` an
   older copy's argparse refusal (exit 2) came through, and with the last test inverted an empty
   answer printed an empty line; the tests failed on each (`tests/test_coach_hook.py`).
+- On 2026-10-08, zizmor 1.30.1 and Scorecard 5.5.0 (the same session size). zizmor over this
+  repository's four workflows takes 0.2 s a run, JSON or plain, and the whole supply-chain group
+  with no base 0.6 s. Its JSON counts rows from 0 where its plain output counts lines from 1
+  (`ci.yml:73:14` in plain was row 72, column 13); the Primary location is the one anchored to,
+  the Hidden and Related ones are the step and the key around it. Left to itself it honoured an
+  inline `# zizmor: ignore[unpinned-uses]` and the ignore rules of a `zizmor.yml` (a High and a Low
+  disappeared); with `--no-ignores --no-config` both came back, the inline one marked `ignored:
+  true` and reported all the same. With `--no-exit-codes` a non-zero exit means it did not run: a
+  file it cannot read as a workflow (a YAML list, a syntax error) is passed over with a warning,
+  and when every file given is such it exits 3 saying it collected no input, which the group reads
+  as no finding. At the regular persona on this repository: one Low, `adhoc-packages` for the
+  `npm install -g` of the Claude Code CLI; the auditor persona adds `undocumented-permissions`,
+  `anonymous-definition` and `concurrency-limits`, style opinions, and `secrets-outside-env`,
+  which would have `RULESETS_TOKEN` read through a GitHub Environment where `rulesets.yml` reads
+  it as a plain Actions secret; the persona is not used. Scorecard `--local` on a clone of this
+  tree runs
+  Binary-Artifacts 10, Dangerous-Workflow 10, Token-Permissions 10, Vulnerabilities 10,
+  Pinned-Dependencies 8 (the npm install, `0 out of 1 npmCommand dependencies pinned`; the pixi
+  download it does not see), Dependency-Update-Tool 0, Fuzzing 0, License 0, SAST 0,
+  Security-Policy 0 and Packaging without a score, aggregate 5.8, in 0.6 s; the other seven checks
+  end with `Unsupported RequestType [0]`. A worktree's `.pixi` link it skipped; a real `.pixi/`
+  holding one binary scored Binary-Artifacts 9. The tarball's sha256 equals the release's
+  `scorecard_checksums.txt`; pixi 0.81.0's asset has no such file, and its digest was measured
+  twice from two downloads at different times and matched the binary this session runs.
 
 On 2026-10-08, with jscpd 5.4.0 (the same session size):
 
@@ -256,3 +299,10 @@ On 2026-10-08, with jscpd 5.4.0 (the same session size):
   leave it to CI there.
 - Whether jscpd's columns count characters or bytes on a line that holds a non-ASCII character
   before a copy starts; a side's anchor is cut by them, and is stable either way.
+- The `scorecard (report)` job on a GitHub runner: its steps were run here under a stub curl that
+  delivers the wrong bytes (the digest check refuses and removes the file) and Scorecard itself on
+  a clone of the tree, never the whole job on a runner; nor whether its Vulnerabilities and Fuzzing
+  checks, which ask OSV and OSS-Fuzz rather than GitHub, answer from a runner as they did here.
+- The strict policy in action: that a pull request behind `main` is held, and merges once the
+  branch carries `main`, has been read in GitHub's description of the flag, not yet seen on a
+  pull request of this repository.

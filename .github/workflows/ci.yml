@@ -14,6 +14,11 @@ env:
   # The pixi that produced the committed lock. Fetched from its release asset by name, not from an
   # install script, so the run makes one fetch it can account for.
   PIXI_VERSION: 0.81.0
+  # The sha256 of that asset (pixi-x86_64-unknown-linux-musl of v0.81.0): this repository's own
+  # measurement of 2026-10-08, from two downloads at different times, equal to the binary the
+  # session that pinned the lock runs; pixi's release publishes no checksum asset to compare with.
+  # A new pixi version means a new digest, measured again the same way.
+  PIXI_SHA256: 248510f5f75460a2ae4ec62d761e15c0191dc35db3b1da6f82d9f17c6017051d
   # The Claude Code CLI the plugin is validated with; `claude plugin validate` needs no sign-in.
   # Pinned so a green check means the same thing tomorrow; raise it on purpose, in its own commit.
   CLAUDE_CODE_VERSION: 2.1.289
@@ -34,9 +39,12 @@ jobs:
         with:
           persist-credentials: false
       - name: install pixi
+        # The digest is checked before the file is made executable or run; a file that is not the
+        # one measured is removed and the job fails.
         run: |
           curl -fsSL -o /usr/local/bin/pixi \
             "https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl"
+          echo "${PIXI_SHA256}  /usr/local/bin/pixi" | sha256sum -c - || { rm -f /usr/local/bin/pixi; exit 1; }
           chmod 0755 /usr/local/bin/pixi
           pixi --version
       - name: reconstruct the environment from the lock

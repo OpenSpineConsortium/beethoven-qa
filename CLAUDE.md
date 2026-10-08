@@ -115,7 +115,12 @@ No module is done, and the gate will not let it enter a run or reach `main`, unt
    only knowingly, and the commit says why. The same gate is the required
    check on `main` (`.github/rulesets/main.json`, applied by `rulesets.yml` with
    `RULESETS_TOKEN`); pull requests open ready for review, never as drafts; `automerge.yml` arms
-   auto-merge and the required checks alone decide.
+   auto-merge and the required checks alone decide. The rule is strict
+   (`strict_required_status_checks_policy: true`): a pull request whose branch fell behind `main`
+   waits until it carries `main`, because the checks ran on a tree `main` would never hold
+   (measured 2026-10-08: with the flag off, `main`'s tree after a merge was never what the checks
+   had run on). Bringing a branch up to date is the session's own step, merge `main` in, gate,
+   push; a push a bot makes with `GITHUB_TOKEN` starts no workflow, so no automation does it.
 
 ## The code standards (greg, 2026-10-04 23:26Z; `docs/STANDARDS.md`)
 
@@ -124,8 +129,10 @@ can read it, change it and trust what built it: **readability** (cognitive compl
 cyclomatic 10, 4 parameters, 25 lines of code), **design** (the Chidamber and Kemerer suite with
 LCOM4), **duplication** and **coverage** (SonarSource's Sonar way conditions on new code: at most 3%
 duplicated, in jscpd's clones of 10 lines and 40 of its tokens, at least 80% covered), **security**
-(bandit, each finding with its CWE) and **supply
-chain** (OpenSSF Scorecard's checks of the workflow files). Each is a module of
+(bandit, each finding with its CWE) and **supply chain** (OpenSSF Scorecard's checks of the
+workflow files, a digest check on every download a step goes on to use, and zizmor's audits at
+its regular persona, High and Medium blocking; Scorecard itself runs in CI as a report that
+blocks nothing). Each is a module of
 `beethoven_qa.standards`, a group of `python -m beethoven_qa standards <group>|all`, a SARIF 2.1.0
 log and a job of the kit's `standards.yml`; each passes or fails alone, and the one required check
 is `standards (every group green)`. They are in this repository, not in six, because the pinned
@@ -243,7 +250,10 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   consumer takes it with its next copy (`vendor --kit`); a consumer that re-pins to a release whose
   kit changed without `--kit` fails `vendor-check` on the file that differs until it does, by
   design. Release 2.0.0 adds `standards.yml` and changes `automerge.yml` and `rulesets.yml` (actions
-  pinned to a commit, writes granted on the job only).
+  pinned to a commit, writes granted on the job only). The release after 4.0.0 changes
+  `standards.yml` (the pixi download checked against its sha256 before it is run, the
+  `scorecard (report)` job) and `session-start.sh` (the same digest check; a pixi whose digest
+  differs is removed and said so, and the session still starts).
 - `plugin/` and `.claude-plugin/marketplace.json`: the Claude Code plugin `beethoven-qa` (skills,
   the `stream` agent, the workflows `gate-until-green`, `verify-module`, `improve-module`, and from
   4.0.0 the code standards' `PostToolUse` hook under `plugin/hooks/`). On a

@@ -12,6 +12,7 @@ checked out; a red gate refuses the push; SKIP_GATE=1 skips it and says so.
 from __future__ import annotations
 
 import functools
+import json
 import os
 import shutil
 import stat
@@ -217,10 +218,10 @@ def test_skip_gate_skips_the_gate_and_says_so(lab: Lab) -> None:
     assert lab.remote_ref("refs/heads/main") == lab.git("rev-parse", "HEAD")
 
 
-def _ci_step_command(name: str) -> str:
+def _step_command(workflow: Path, name: str) -> str:
     # The `run:` of the named step, read from the workflow text as written: a plain value, or a
-    # literal block (`|`) dedented. Enough for this file's steps, and no YAML library in the lock.
-    lines = CI.read_text().splitlines()
+    # literal block (`|`) dedented. Enough for the kit's steps, and no YAML library in the lock.
+    lines = workflow.read_text().splitlines()
     start = next(i for i, line in enumerate(lines) if line.strip() == f"- name: {name}")
     for j in range(start + 1, len(lines)):
         text = lines[j].strip()
@@ -238,7 +239,7 @@ def _ci_step_command(name: str) -> str:
                 break
             block.append(line)
         return textwrap.dedent("\n".join(block))
-    raise AssertionError(f"ci.yml has no run line for the step {name!r}")
+    raise AssertionError(f"{workflow.name} has no run line for the step {name!r}")
 
 
 @pytest.mark.parametrize("broken", [None, *KIT_SHELL])
@@ -252,9 +253,121 @@ def test_ci_checks_the_syntax_of_every_kit_shell_file(tmp_path: Path, broken: st
         with (tmp_path / broken).open("a") as handle:
             handle.write("\nif then fi (((\n")
     done = subprocess.run(
-        ["bash", "-eo", "pipefail", "-c", _ci_step_command("shell syntax of the kit")],
+        ["bash", "-eo", "pipefail", "-c", _step_command(CI, "shell syntax of the kit")],
         cwd=tmp_path,
         capture_output=True,
         text=True,
     )
     assert (done.returncode == 0) == (broken is None), (broken, done.stderr)
+
+
+def _stub_curl(bin_dir: Path, body: bytes) -> Path:
+    # Stands in for curl: writes ``body`` to the file named after -o, records the call, exits 0.
+    # So the file arrives, and only the digest check can tell it is not the one measured.
+    record = bin_dir / "curl-calls"
+    curl = bin_dir / "curl"
+    curl.write_text(
+        "#!/bin/bash\n"
+        f"printf '%s\\n' \"$*\" >> '{record}'\n"
+        'out=""\n'
+        'while [ $# -gt 0 ]; do if [ "$1" = -o ]; then out="$2"; shift; fi; shift; done\n'
+        f"[ -n \"$out\" ] && printf '%s' '{body.decode('ascii')}' > \"$out\"\n"
+        "exit 0\n"
+    )
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return record
+
+
+def test_main_is_merged_only_from_a_branch_that_carries_it() -> None:
+    # Measured 2026-10-08: with the strict flag off, the tree main held after a merge was never
+    # the one the checks had run on. The rule file is what rulesets.yml applies.
+    rule = json.loads((REPO / ".github" / "rulesets" / "main.json").read_text(encoding="utf-8"))
+    checks = next(r for r in rule["rules"] if r["type"] == "required_status_checks")
+    assert checks["parameters"]["strict_required_status_checks_policy"] is True
+    required = {c["context"] for c in checks["parameters"]["required_status_checks"]}
+    assert "standards (every group green)" in required
+    assert "scorecard (report)" not in required  # it reports, it never blocks
+
+
+@pytest.mark.parametrize(
+    ("workflow", "step", "target"),
+    [
+        ("ci.yml", "install pixi", "/usr/local/bin/pixi"),
+        ("standards.yml", "install pixi", "/usr/local/bin/pixi"),
+        ("standards.yml", "fetch scorecard and check its digest", "scorecard.tar.gz"),
+    ],
+)
+def test_a_download_that_is_not_the_one_measured_fails_the_step_and_is_removed(
+    tmp_path: Path, workflow: str, step: str, target: str
+) -> None:
+    # The step as the kit writes it, under a curl that delivers the wrong bytes, with the install
+    # path pointed at a throwaway folder: the digest check refuses, the file is gone, and nothing
+    # after it (chmod, the run, the unpacking) happens.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _stub_curl(bin_dir, b"not the file measured\n")
+    script = _step_command(REPO / ".github" / "workflows" / workflow, step)
+    script = script.replace("/usr/local/bin/pixi", str(tmp_path / "pixi"))
+    env = {
+        **_env(bin_dir),
+        "RUNNER_TEMP": str(tmp_path),
+        "PIXI_VERSION": "0.81.0",
+        "PIXI_SHA256": "0" * 64,
+        "SCORECARD_VERSION": "5.5.0",
+        "SCORECARD_SHA256": "0" * 64,
+    }
+    argv = ["bash", "-eo", "pipefail", "-c", script]
+    done = subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, env=env)
+    assert done.returncode != 0
+    assert "FAILED" in done.stdout + done.stderr
+    assert not (tmp_path / Path(target).name).exists()
+    assert not (tmp_path / "scorecard").exists()
+    assert len((bin_dir / "curl-calls").read_text().splitlines()) == 1
+
+
+def _hook(tmp_path: Path, bin_dir: Path) -> subprocess.CompletedProcess[str]:
+    # The session-start hook as a cloud session runs it, on a throwaway home and project.
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env = {**_env(bin_dir), "HOME": str(home), "CLAUDE_CODE_REMOTE": "true"}
+    env["CLAUDE_PROJECT_DIR"] = str(tmp_path / "project")
+    (tmp_path / "project").mkdir(exist_ok=True)
+    return subprocess.run(
+        ["bash", str(REPO / ".claude" / "hooks" / "session-start.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def test_the_hook_keeps_no_pixi_whose_digest_differs(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = _stub_curl(bin_dir, b"not pixi\n")
+    done = _hook(tmp_path, bin_dir)
+    assert done.returncode == 0, done.stderr  # the hook never fails a session
+    assert "sha256 differs" in done.stdout and "removed" in done.stdout
+    assert sorted(p.name for p in (tmp_path / "home" / ".pixi" / "bin").iterdir()) == []
+    assert len(record.read_text().splitlines()) == 1
+
+
+def test_the_hook_fetches_nothing_when_its_pixi_is_already_there(tmp_path: Path) -> None:
+    # A pixi of the right version is kept as it is: no download, so no digest to check; the hook
+    # goes on to the locked install, which the stub records.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = _stub_curl(bin_dir, b"never written\n")
+    pixi_bin = tmp_path / "home" / ".pixi" / "bin"
+    pixi_bin.mkdir(parents=True)
+    pixi = pixi_bin / "pixi"
+    pixi.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> '{tmp_path / 'pixi-calls'}'\n"
+        '[ "$1" = --version ] && echo "pixi 0.81.0"\n'
+        "exit 0\n"
+    )
+    pixi.chmod(pixi.stat().st_mode | stat.S_IXUSR)
+    done = _hook(tmp_path, bin_dir)
+    assert done.returncode == 0, done.stderr
+    assert not record.exists()
+    assert "install --locked" in (tmp_path / "pixi-calls").read_text()

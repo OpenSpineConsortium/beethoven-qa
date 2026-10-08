@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -31,9 +32,11 @@ from beethoven_qa.standards import (
     supply_chain,
 )
 from beethoven_qa.standards.group import Context, Report
+from beethoven_qa.standards.newcode import Changes
 from beethoven_qa.standards.sarif import sarif_log
 from test_standards import validate_sarif
 
+REPO = Path(__file__).resolve().parent.parent
 PKG = "src/pkg"
 
 # Cognitive complexity 19 (Campbell's rules: each loop and if 1 plus its nesting, each run of a
@@ -539,10 +542,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@{SHA}
+        with:
+          persist-credentials: false
       - uses: ./local-action
       - run: echo "$TITLE"
         env:
           TITLE: ${{{{ github.event.issue.title }}}}
+      - run: |
+          curl -fsSL -o "$RUNNER_TEMP/tool" https://example.invalid/tool
+          echo "{"0" * 64}  $RUNNER_TEMP/tool" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/tool"
 """
 
 BAD = """\
@@ -560,9 +569,34 @@ jobs:
       - name: greet
         run: echo "${{ github.event.pull_request.title }}"
       - run: curl -fsSL https://example.invalid/install.sh | sudo bash
+      - run: |
+          wget -q https://example.invalid/tool.tgz
+          tar xzf tool.tgz && ./tool --version
   reuse:
     uses: some/repo/.github/workflows/x.yml@main
 """
+
+# A third party's action and an install outside a lockfile, with zizmor told to look away in every
+# way it accepts: an inline comment (spelled from its parts, since the gate refuses one written
+# out), and an ignore rule in both places a configuration file lives.
+LOOK_AWAY_COMMENT = "# " + "zizmor: " + "ignore[unpinned-uses]"
+THIRD = f"""\
+name: third
+on: [push]
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@{SHA}
+        with:
+          persist-credentials: false
+      - uses: someone/thing@v1 {LOOK_AWAY_COMMENT}
+      - run: npm install -g foo
+"""
+LOOK_AWAY = "rules:\n  unpinned-uses:\n    ignore:\n      - third.yml\n"
+LOOK_AWAY += "  adhoc-packages:\n    ignore:\n      - third.yml\n"
 
 
 def test_supply_chain_rules() -> None:
@@ -576,6 +610,29 @@ def test_supply_chain_rules() -> None:
     assert supply_chain.untrusted(script) == (" github.head_ref ",)
     assert supply_chain.pipes_to_shell("wget -qO- x | sh")
     assert not supply_chain.pipes_to_shell("curl x > f")
+    assert supply_chain.level_for("High") == supply_chain.level_for("Medium") == "error"
+    assert supply_chain.level_for("Low") == supply_chain.level_for("Informational") == "note"
+
+
+def test_a_download_the_step_goes_on_to_use_needs_a_digest_check() -> None:
+    fetch = 'curl -fsSL -o /usr/local/bin/pixi \\\n  "https://example.invalid/v${V}/pixi"\n'
+    use = "chmod 0755 /usr/local/bin/pixi\npixi --version\n"
+    assert supply_chain.unchecked_download(fetch + use)
+    assert supply_chain.unchecked_download("wget https://example.invalid/a.tgz\ntar xzf a.tgz\n")
+    assert supply_chain.unchecked_download("curl -O https://example.invalid/a.sh && bash a.sh\n")
+    assert not supply_chain.unchecked_download(fetch)  # fetched and left alone
+    # Checked against a digest, in either form the rule names, before the use.
+    digest = "0" * 64
+    check = f'echo "{digest}  /usr/local/bin/pixi" | sha256sum -c -\n'
+    assert not supply_chain.unchecked_download(fetch + check + use)
+    check = 'echo "$PIXI_SHA256  /usr/local/bin/pixi" | sha256sum --status --check -\n'
+    assert not supply_chain.unchecked_download(fetch + check + use)
+    check = f'test "$(sha256sum /usr/local/bin/pixi | cut -c1-64)" = {digest} || exit 1\n'
+    assert not supply_chain.unchecked_download(fetch + check + use)
+    # A download piped into a shell is the pipe rule's, and a pipe to stdout fetches no file.
+    assert not supply_chain.unchecked_download("curl -fsSL https://example.invalid/i.sh | sh\n")
+    assert not supply_chain.unchecked_download("wget -qO- https://example.invalid/i.sh | sh\n")
+    assert not supply_chain.unchecked_download("wget -O - https://example.invalid/i | bash\n")
 
 
 def test_workflows_are_held_to_scorecards_checks(tmp_path: Path) -> None:
@@ -583,15 +640,98 @@ def test_workflows_are_held_to_scorecards_checks(tmp_path: Path) -> None:
     _write(root, {".github/workflows/good.yml": GOOD, ".github/workflows/bad.yaml": BAD})
     report = _check(root, "supply-chain")
     assert not report.passed
-    found = {(f.path.rsplit("/", 1)[-1], f.rule.split("/")[1], f.line) for f in report.blocking}
-    assert found == {
-        ("bad.yaml", "token-permissions", 4),
-        ("bad.yaml", "pinned-action", 9),
-        ("bad.yaml", "untrusted-checkout", 11),
-        ("bad.yaml", "script-injection", 13),
-        ("bad.yaml", "pipe-to-shell", 14),
-        ("bad.yaml", "pinned-action", 16),
+    found = {(f.path.rsplit("/", 1)[-1], f.rule, f.line) for f in report.blocking}
+    assert {f for f in found if f[1].startswith("supply-chain/")} == {
+        ("bad.yaml", "supply-chain/token-permissions", 4),
+        ("bad.yaml", "supply-chain/pinned-action", 9),
+        ("bad.yaml", "supply-chain/untrusted-checkout", 11),
+        ("bad.yaml", "supply-chain/script-injection", 13),
+        ("bad.yaml", "supply-chain/pipe-to-shell", 14),
+        ("bad.yaml", "supply-chain/unchecked-download", 16),
+        ("bad.yaml", "supply-chain/pinned-action", 19),
     }
+    # zizmor's own reading of the same file, each at the line of its primary location, Medium and
+    # High both errors; good.yml gives it nothing above Low.
+    assert {f for f in found if f[1].startswith("zizmor/")} == {
+        ("bad.yaml", "zizmor/dangerous-triggers", 2),
+        ("bad.yaml", "zizmor/excessive-permissions", 4),
+        ("bad.yaml", "zizmor/artipacked", 9),
+        ("bad.yaml", "zizmor/unpinned-uses", 9),
+        ("bad.yaml", "zizmor/template-injection", 13),
+        ("bad.yaml", "zizmor/unpinned-uses", 19),
+    }
+    reader, audits = report.runs
+    assert (reader.tool, audits.tool) == ("beethoven-qa", "zizmor")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", audits.version), audits.version
+
+
+def test_zizmor_is_read_at_the_regular_persona_and_nothing_tells_it_to_look_away(
+    tmp_path: Path,
+) -> None:
+    files = {"zizmor.yml": LOOK_AWAY, ".github/zizmor.yml": LOOK_AWAY}
+    root = _repo(tmp_path, files)
+    _write(root, {".github/workflows/third.yml": THIRD})
+    report = _check(root, "supply-chain")
+    assert not report.passed
+    # The reader refuses the tag too; zizmor's own reading sits beside it.
+    rules = [f.rule for f in report.blocking]
+    assert rules == ["supply-chain/pinned-action", "zizmor/unpinned-uses"]
+    stop = report.blocking[1]
+    assert (stop.rule, stop.line, stop.level) == ("zizmor/unpinned-uses", 12, "error")
+    assert stop.anchor == f"- uses: someone/thing@v1 {LOOK_AWAY_COMMENT}"
+    assert "action is not pinned to a hash" in stop.message and "high severity" in stop.message
+    audits = report.runs[1]
+    notes = [f for f in audits.findings if f.level == "note"]
+    assert [(f.rule, f.line) for f in notes] == [("zizmor/adhoc-packages", 13)]  # recorded only
+    rule = next(r for r in audits.rules if r.id == "zizmor/adhoc-packages")
+    assert rule.help_uri == "https://docs.zizmor.sh/audits/#adhoc-packages"
+    log = json.loads(json.dumps(sarif_log(report.runs)))
+    validate_sarif(log)
+    result = log["runs"][1]["results"][0]
+    assert result["locations"][0]["physicalLocation"]["region"]["startLine"] == 12
+    # Committed, moved down a line, the finding is the base's and passes.
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "third")
+    _write(root, {".github/workflows/third.yml": "# moved down\n" + THIRD})
+    report = _check(root, "supply-chain")
+    assert report.passed
+    assert _states(report)[("zizmor/unpinned-uses", stop.anchor)] == "unchanged"
+
+
+def test_a_zizmor_that_fails_fails_the_group_in_its_own_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path, {})
+    _write(root, {".github/workflows/good.yml": GOOD})
+    stub = tmp_path / "zizmor"
+    stub.write_text("#!/bin/sh\necho 'boom' >&2\nexit 1\n", encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setattr(supply_chain, "_bin", lambda name: str(stub))
+    with pytest.raises(RuntimeError, match="zizmor failed: boom"):
+        _check(root, "supply-chain")
+
+
+def test_a_file_zizmor_cannot_read_as_a_workflow_is_passed_over(tmp_path: Path) -> None:
+    # The reader passes over what does not parse as a mapping; zizmor, told so by its own exit,
+    # collected nothing, which is no finding and no failure.
+    root = _repo(tmp_path, {})
+    _write(root, {".github/workflows/notes.yml": "- not a workflow\n"})
+    report = _check(root, "supply-chain")
+    assert report.passed and all(not run.findings for run in report.runs)
+
+
+def test_this_repositorys_own_workflows_pass_the_reader_and_zizmor() -> None:
+    # Every finding new (no base): the tree passes only if nothing of error level is in it. The
+    # one note is zizmor's Low for the npm install of the Claude Code CLI, which has no lockfile
+    # to pin it (recorded, accepted; supply_chain's docstring).
+    context = Context(REPO, None, "src/beethoven_qa", Changes((), (), True))
+    report = supply_chain._check(context)
+    assert report.passed, report.summary
+    recorded = {(f.rule, f.level) for run in report.runs for f in run.findings}
+    assert recorded == {("zizmor/adhoc-packages", "note")}
+    # The hook is no workflow, so the reader never sees it; its download keeps the rule anyway.
+    hook = (REPO / ".claude" / "hooks" / "session-start.sh").read_text(encoding="utf-8")
+    assert supply_chain._FETCH.search(hook) and not supply_chain.unchecked_download(hook)
 
 
 def test_a_workflow_with_no_permissions_is_reported_where_its_jobs_start(tmp_path: Path) -> None:
@@ -742,7 +882,10 @@ def test_a_workflow_edit_is_held_to_the_supply_chain_group(
     edited = str(root / ".github/workflows/bad.yaml")
     told = json.loads(_coached(root, edited, monkeypatch, capsys))["reason"]
     said = [line for line in told.splitlines() if line.startswith("  .github/workflows/bad.yaml:")]
-    assert len(said) == 6 and "supply-chain/pinned-action" in told and " more" not in told
+    # The reader's seven and zizmor's six: one over the answer's cap, so twelve are said and the
+    # last is counted.
+    assert len(said) == 12 and "supply-chain/pinned-action" in told and "and 1 more" in told
+    assert "zizmor/template-injection" in told
 
 
 def test_coaching_says_nothing_when_it_cannot_or_should_not(

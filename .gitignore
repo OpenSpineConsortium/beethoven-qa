@@ -1,6 +1,8 @@
-# Pixi's solved environment: reconstructable from pixi.lock, never committed. Without the slash,
-# so a worktree whose .pixi is a link to the main checkout's environment is covered too.
+# Pixi's solved environment: reconstructable from pixi.lock, never committed; nor a link to the
+# main checkout's, which a build stream's worktree carries in its place (a link is no directory
+# to git, so the slashed form alone would list it as untracked and the pre-push hook would refuse).
 .pixi
+.pixi/
 
 # Python
 __pycache__/
