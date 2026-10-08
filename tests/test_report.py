@@ -192,7 +192,7 @@ def test_the_real_branch_rule_and_workflows() -> None:
     required, strict = _ruleset(REPO / ".github" / "rulesets" / "main.json")
     assert "gate (lock → lint, typecheck, tests, CrossHair/Z3)" in required
     assert "standards (every group green)" in required
-    assert strict is False
+    assert strict is True
     workflows = dict(_workflows(REPO))
     assert "report (evidence)" in workflows["ci.yml"]
     assert "report (evidence)" not in required  # the report is evidence, never a required check

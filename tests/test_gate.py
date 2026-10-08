@@ -487,6 +487,8 @@ d = 4  # pragma: no cover
 # complexipy: ignore
 e = 5  # ruff: noqa
 f = 6  # mypy: ignore-errors
+#lizard forgive
+h = 7  # GENERATED CODE, this comment says, and lizard would read no further
 g = "# noqa and # type: ignore in a string"
 # the standards ignore a noqa anyway, as this comment says without carrying one
 """
@@ -518,6 +520,8 @@ def test_gate_refuses_suppressions_and_skipped_tests(tmp_path: Path) -> None:
         "# complexipy: ignore",
         "# ruff: noqa",
         "# mypy: ignore-errors",
+        "#lizard forgive",
+        "# GENERATED CODE, this comment says, and lizard would read no further",
     ):
         line = _line(COMMENTED, comment)
         assert f"gate: suppression src/toy/logic.py:{line}: {comment}: {why}" in out, out
@@ -532,7 +536,7 @@ def test_gate_refuses_suppressions_and_skipped_tests(tmp_path: Path) -> None:
     ):
         line = _line(HIDDEN_TESTS, needle)
         assert f"gate: skip tests/test_hidden.py:{line}: {name}: a test is never skipped" in out
-    assert out.count("gate: skip ") == 6 and out.count("gate: suppression ") == 9, out
+    assert out.count("gate: skip ") == 6 and out.count("gate: suppression ") == 11, out
     assert "vendor" not in out, out
     assert "gate: instead of a suppression:" in out
 

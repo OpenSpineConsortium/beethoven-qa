@@ -807,7 +807,7 @@ def test_the_copy_carries_the_manifest_the_boundary_check_reads(tmp_path: Path) 
             "into": VENDOR_DIR,
             "origin": f"{VENDOR_DIR}/{ORIGIN_NAME}",
         }
-        for export, version in (("python", 1), ("cli", 2), ("kit", 1))
+        for export, version in (("python", 1), ("cli", 3), ("kit", 2))
     ]
     manifest = {
         "format": 1,

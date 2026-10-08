@@ -106,9 +106,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: install pixi
+        # The same digest check as the gate job's: nothing downloaded runs unchecked.
         run: |
           curl -fsSL -o /usr/local/bin/pixi \
             "https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl"
+          echo "${PIXI_SHA256}  /usr/local/bin/pixi" | sha256sum -c - || { rm -f /usr/local/bin/pixi; exit 1; }
           chmod 0755 /usr/local/bin/pixi
           pixi --version
       - name: reconstruct the environment from the lock

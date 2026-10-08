@@ -123,7 +123,7 @@ def _consumer(tmp_path: Path, name: str = "beethoven-research") -> Path:
     _git(root, "init", "-q")
     imports = [
         _import("beethoven-qa", "python", VENDOR_DIR),
-        _import("beethoven-qa", "cli", VENDOR_DIR, 2),
+        _import("beethoven-qa", "cli", VENDOR_DIR, 3),
         _import(HPC, "profiles", "profiles"),
     ]
     _write(root, "interface/INTERFACE.json", _manifest(name, imports))
@@ -665,7 +665,7 @@ def test_rule_3_beethoven_qa_is_taken_only_as_its_copy(
     code, out = _run(root, capsys)
     assert code == 1
     assert f"taken only with its vendor command, into {VENDOR_DIR}, never into third_party" in out
-    assert "does not offer python version 2 (it offers cli 2, docs 1, kit 1, plugin 1" in out
+    assert "does not offer python version 2 (it offers cli 3, docs 1, kit 2, plugin 1" in out
     assert "does not carry the docs export: docs/CONSUMING.md, docs/STANDARDS.md" in out
     shutil.rmtree(root / VENDOR_DIR / "interface")  # a copy of 1.0.0, from before the manifest
     code, out = _run(root, capsys)

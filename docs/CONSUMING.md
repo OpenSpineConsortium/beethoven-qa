@@ -252,8 +252,9 @@ being imported, a `# crosshair:` directive, a public coroutine (CrossHair would 
 object, not its result), contracts on a pydantic model (CrossHair does not construct one), and a
 package with nothing to prove; and on what would hide a finding from the standards or a test
 from the run, in the package and in `tests/`: a suppression comment (`# noqa`, `# type: ignore`,
-`# nosec`, `# pragma: no cover`, `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`) or
-a test skipped or expected to fail (pytest's and unittest's marks and calls).
+`# nosec`, `# pragma: no cover`, `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`,
+lizard's `#lizard forgive` and `GENERATED CODE`) or a test skipped or expected to fail (pytest's
+and unittest's marks and calls).
 
 A function CrossHair must not run, because it reads, writes, asks the clock or the environment or
 starts a process, or cannot run, because of a fault of CrossHair's own that was measured, is named
@@ -374,7 +375,7 @@ decorators, runs the commands, carries the kit and registers the plugin):
 What beethoven-qa offers is its own manifest, which the copy carries
 (`vendor/beethoven-qa/interface/INTERFACE.json`, explained in `interface/README.md` there): `python`
 (`beethoven_qa.contracts` and `beethoven_qa.__version__`, nothing else of the package), `cli` (the
-five commands, their options and exit codes, and this table), `kit`, `plugin`, and `docs`, the two
+seven commands, their options and exit codes, and this table), `kit`, `plugin`, and `docs`, the two
 documents, which the copy does not carry and an import of which the lane refuses. An import of
 beethoven-qa into any other folder, or of an export or version the copy's manifest does not offer,
 is a finding of rule 3. Which exports a repository takes is the person's to write; the lane checks

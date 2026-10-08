@@ -11,7 +11,8 @@ Two checks; both always run, and the gate fails on either:
    that only ever says "no counterexample" because there was nothing to check is the
    wrong-but-plausible failure this project guards against. Nothing sets a finding aside either:
    no comment of the kind the standards' tools read (``# noqa``, ``# type: ignore``, ``# nosec``,
-   ``# pragma: no cover``, ``# jscpd:ignore``, ``# zizmor: ignore``, ``# complexipy: ignore``), and
+   ``# pragma: no cover``, ``# jscpd:ignore``, ``# zizmor: ignore``, ``# complexipy: ignore``,
+   lizard's ``#lizard forgive`` and ``GENERATED CODE``), and
    no test skipped or expected to fail (pytest's and unittest's marks and calls), in the package
    and in the repository's ``tests/`` directory, since the standards honour no such comment and a
    test that does not run proves nothing. A string that holds such text is not a finding.
@@ -687,6 +688,10 @@ _SUPPRESSION = re.compile(
     r"|jscpd\s*:\s*ignore"
     r"|zizmor\s*:\s*ignore"
     r"|complexipy\s*:\s*ignore"
+    # lizard reads these two in this case only: ``#lizard forgive`` drops the function the comment
+    # closes from its count and ``GENERATED CODE`` anywhere in a comment drops the rest of the file.
+    r"|(?-i:lizard forgive)"
+    r"|(?-i:GENERATED CODE)"
     r")",
     re.IGNORECASE,
 )

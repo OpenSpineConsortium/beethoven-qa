@@ -188,8 +188,9 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   reason); `--report-all` is accepted and changes nothing. Check 1 also refuses, in the package
   and in the repository's `tests/`, each with its file and line: every comment a standards' tool
   would read as a suppression (`# noqa`, `# type: ignore`, `# nosec`, `# pragma: no cover`,
-  `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`, and the file-level `# ruff: noqa`,
-  `# flake8: noqa` and `# mypy: ignore-errors`), and every test skipped or expected to fail
+  `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`, the file-level `# ruff: noqa`,
+  `# flake8: noqa` and `# mypy: ignore-errors`, and lizard's `#lizard forgive` and `GENERATED
+  CODE`), and every test skipped or expected to fail
   (pytest's and unittest's marks and calls, however imported). A string that spells one is no
   finding, a pinned copy under `vendor/` is never read, and under `--module` only that module's
   own file is.
@@ -201,7 +202,7 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   `pull.sh`: only a commit `main` contains, each file's bytes checked against the blob id the
   commit's tree gives it, no checkout of beethoven-qa read; it runs from the consumer's own copy
   (from a clone of the release the first time, when the copy is older than 3.0.0), and the `cli`
-  export is at version 2 for the new required `--ref`. The plain
+  export went to version 2 for the new required `--ref` (and to 3 in 5.0.0, for `report`). The plain
   check catches an edit that leaves ORIGIN alone; an edit that also rewrites ORIGIN is caught only
   with `--source`, which rebuilds the tree from the commit ORIGIN names (docs/CONSUMING.md). So is
   an edit to the copy's own `vendor.py`, since the consumer's environment runs the copy's code:
@@ -255,9 +256,10 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   folder as an artifact and is not a required check.
 - `interface/` (from 2.0.0): this repository's manifest under that standard, `INTERFACE.json`, with
   `python.json` (the modules and names a consumer may import: `beethoven_qa.contracts` and
-  `__version__`, nothing else) and `cli.json` (the five commands, their options and exit codes,
+  `__version__`, nothing else) and `cli.json` (the seven commands, their options and exit codes,
   the `[tool.beethoven-qa]` table); exports `python`, `cli`, `kit`, `plugin` (files: Claude Code
-  reads it, nobody runs it) and `docs` (text), each at version 1 (`interface/README.md`). The copy
+  reads it, nobody runs it) and `docs` (text); `cli` is at version 3 and `kit` at 2 since 5.0.0,
+  the others at 1 (`interface/README.md`). The copy
   carries it, so a consumer finds it at `vendor/beethoven-qa/interface/`;
   `tests/test_interface.py` holds it to the code.
 - The repository kit, carried byte for byte by every consumer: `.githooks/pre-push`,
