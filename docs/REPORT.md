@@ -91,10 +91,10 @@ without the lane tasks. A refused run writes nothing.
    a model write code and contracts; the coaching hook has a model read a verdict beside its
    edit; no verdict comes from a model.
 9. **What this report does not show.** A "not confirmed" condition is a bounded search, not a
-   proof. The standards block only code new or worse since the base commit. The tests pass, but
-   what each means is a person's judgement, as is what each contract promises. The gate runs on
-   the machine that pushes and again on GitHub's runner, and the report is as true as the
-   machine that made it: its lanes ran in that machine's environment.
+   proof. The standards block only code new or worse since the base commit. A green test lane
+   says every test passed, but what each means is a person's judgement, as is what each contract
+   promises. The gate runs on the machine that pushes and again on GitHub's runner, and the
+   report is as true as the machine that made it: its lanes ran in that machine's environment.
 
 `report.json` carries the same facts for a program, field for field as the sections above
 (`format` 1; `made`, `version`, `repository`, `tools`, `lanes`, `gate`, `standards`,

@@ -148,8 +148,8 @@ NOT_SHOWN: tuple[str, ...] = (
     "seconds; it is not a proof. Only a condition confirmed over all paths is one.",
     "The code standards block only code new or worse since the base commit; the findings of "
     "older code are recorded as unchanged and pass.",
-    "The tests pass; what each test means, and whether it is the right test, is a person's "
-    "judgement, and so is what each contract promises.",
+    "A green test lane says every test passed; what each test means, and whether it is the "
+    "right test, is a person's judgement, and so is what each contract promises.",
     "The gate runs on the machine that pushes and again on GitHub's runner; this report is as "
     "true as the machine that made it, and no truer. Its lanes ran in that machine's environment.",
 )
