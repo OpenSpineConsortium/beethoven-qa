@@ -146,7 +146,8 @@ Never skip, disable or quarantine a test, loosen a symbolic bound, remove a cont
 precondition to exclude an input the callers really pass, add a `# crosshair:` directive, exempt
 a module that holds logic, or set aside under `unproven` a function CrossHair can run, to get
 green; nor raise a standards limit, add a suppression comment the standards ignore anyway, rename a
-function to dodge its findings, or weaken a test so coverage counts fewer lines. A precondition
+function to dodge its findings, or weaken a test so coverage counts fewer lines. The gate refuses
+a suppression comment and a skipped test outright, so none of them gets green. A precondition
 that states the function's real domain, which no caller ever leaves, is not dodging (see
 `vendor.stale_files`).
 
@@ -167,8 +168,22 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   or listed, and a listed function's contracts are checked by the tests alone),
   one process per target, as many at a time as the allocation has cores (`BEETHOVEN_QA_JOBS` can
   lower it, never raise it), each condition bounded by `per_condition_timeout`. `--module` limits
-  both checks to one module (an entry of a deeper module stays that module's, imported or not);
-  `--report-all` prints every condition's verdict and fails on a precondition no input can meet.
+  both checks to one module (an entry of a deeper module stays that module's, imported or not).
+  Every run prints every condition's verdict, counts them under each target (`gate: <target>: <c>
+  confirmed over all paths, <n> not confirmed within <T> s, <u> unable to meet a precondition`,
+  right after its exit line) and over the run as the last line before the verdict (`gate:
+  conditions: <c> of <m> confirmed over all paths, <n> not confirmed within <T> s per condition,
+  <u> unable to meet a precondition`, byte for byte: the report command reads it back), and fails
+  on a precondition no input can meet, which is either a vacuous contract or one stated over values
+  CrossHair cannot build (restate it over an enum, or list the function under `unproven` with that
+  reason); `--report-all` is accepted and changes nothing. Check 1 also refuses, in the package
+  and in the repository's `tests/`, each with its file and line: every comment a standards' tool
+  would read as a suppression (`# noqa`, `# type: ignore`, `# nosec`, `# pragma: no cover`,
+  `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`, and the file-level `# ruff: noqa`,
+  `# flake8: noqa` and `# mypy: ignore-errors`), and every test skipped or expected to fail
+  (pytest's and unittest's marks and calls, however imported). A string that spells one is no
+  finding, a pinned copy under `vendor/` is never read, and under `--module` only that module's
+  own file is.
 - `beethoven_qa.vendor`, `python -m beethoven_qa vendor --into <repo> --ref <tag> [--kit]` and
   `python -m beethoven_qa vendor-check [--source <beethoven-qa checkout>]`: the pinned copy at
   `vendor/beethoven-qa/`, with its `ORIGIN` record, and the check that the copy and the kit files
@@ -325,7 +340,31 @@ that states the function's real domain, which no caller ever leaves, is not dodg
 - The code standards (2026-10-05): what was measured while building them, the tools' behaviour
   without the flags that disable a repository's suppressions among it, is under "Measured" in
   `docs/STANDARDS.md`. The symbolic gate went from 10 targets in about 2 minutes to 32 in about 7
-  on 4 cores.
+  on 4 cores, and to 41 by 2026-10-08 (below).
+
+- Every verdict, every run (2026-10-08, this cloud session, 4 cores; CrossHair 0.0.111). Until this
+  change the plain gate, the one the pre-push hook and CI run, started CrossHair without
+  `--report_all`, so it saw no condition's verdict and passed a precondition no input can meet in
+  silence; only `--report-all` showed them. Measured with it on the package as it stood: 107 of
+  117 conditions were "Not confirmed" at the 20 s bound, so the symbolic step is a bounded search
+  for most conditions and a proof for the rest; and the one target reported "Unable to meet
+  precondition", `standards.security.level_for`, was not vacuous: its precondition held two
+  strings to bandit's four grades, and CrossHair found no input for it within the bound. Stated
+  as `Literal["UNDEFINED", "LOW", "MEDIUM", "HIGH"]`, CrossHair 0.0.111 raised inside its own
+  argument builder (`get_type_hints` on the Literal, in `proxy_for_class`); as the `StrEnum`
+  `Grade` it enumerates the members, both conditions are confirmed over all paths in about a
+  second, and a body that ignored the confidence gave the counterexample `(Grade.HIGH, Grade.LOW)`.
+  The vacuity line now says both possibilities. Every run prints every verdict and counts them:
+  the package-wide gate (`pixi run --locked symbolic`, 41 targets) reported `gate: conditions:
+  11 of 121 confirmed over all paths, 110 not confirmed within 20 s per condition, 0 unable to
+  meet a precondition` in 11 min 57 s wall time on 4 cores shared with two other sessions' test
+  runs; the module gate on `beethoven_qa.gate` (6 targets, `verdicts` among them) 1 of 21
+  confirmed over all paths (`is_public`), 20 not confirmed at the bound, every one of them over
+  strings or tuples, no counterexample, in 2 min 6 s. The suppression check, run on
+  this repository first, found the five comments it carried, all in tests (four `type: ignore`
+  on deliberate wrong calls and on a SARIF log indexed as an untyped mapping, one `noqa` on a
+  bound lambda for a rule the ruff configuration ignores anyway), and nothing in the package;
+  each went by typing the wrong value `Any`, reading the log back as JSON, or writing a `def`.
 
 ## Build and test
 
@@ -335,7 +374,7 @@ pixi run --locked gate        # lint (ruff) + typecheck (mypy strict) + tests (p
 pixi run --locked symbolic    # just the gate: python -m beethoven_qa gate
 pixi run --locked standards   # the code standards, every group, against where this branch left main
 pixi run --locked boundary    # the interface standard's five rules on this tree
-pixi run --locked python -m beethoven_qa gate --module beethoven_qa.vendor --report-all   # one module
+pixi run --locked python -m beethoven_qa gate --module beethoven_qa.vendor  # one module
 pixi run hooks                # point git at .githooks (the session-start hook does this in a cloud session)
 ```
 

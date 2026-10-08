@@ -235,13 +235,17 @@ The gate's symbolic lane runs one CrossHair process per contracted function and 
 class, as many at a time as the allocation's cores; `BEETHOVEN_QA_JOBS` lowers the count on a
 laptop busy with other work and never raises it. Both of the gate's checks always run, so an
 uncontracted function in one module does not stop CrossHair proving the others. For one module,
-`python -m beethoven_qa gate --module <pkg.mod>`; with `--report-all` it prints every condition's
-verdict and fails on a precondition no input can meet. Beyond a missing contract, the gate fails
+`python -m beethoven_qa gate --module <pkg.mod>`. Every run prints every condition's verdict,
+counts them under each target and over the run, and fails on a precondition no input can meet
+(`--report-all` is accepted and changes nothing). Beyond a missing contract, the gate fails
 on whatever would keep a function out of CrossHair's sight: a `.py` file under the package that is
 not one of its modules (a directory without `__init__.py`), a module that fails or exits while
 being imported, a `# crosshair:` directive, a public coroutine (CrossHair would check the coroutine
 object, not its result), contracts on a pydantic model (CrossHair does not construct one), and a
-package with nothing to prove.
+package with nothing to prove; and on what would hide a finding from the standards or a test
+from the run, in the package and in `tests/`: a suppression comment (`# noqa`, `# type: ignore`,
+`# nosec`, `# pragma: no cover`, `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`) or
+a test skipped or expected to fail (pytest's and unittest's marks and calls).
 
 A function CrossHair must not run, because it reads, writes, asks the clock or the environment or
 starts a process, or cannot run, because of a fault of CrossHair's own that was measured, is named

@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import jsonschema
 import pytest
@@ -214,11 +215,12 @@ def test_a_log_validates_and_carries_what_is_matched_on() -> None:
     run = Run("group", "tool", "1.0.0", "https://example.invalid", (rule,), head, states)
     log = sarif_log((run, run._replace(findings=(), states=())))
     validate_sarif(log)
-    result = log["runs"][0]["results"][0]  # type: ignore[index]
+    runs: Any = json.loads(json.dumps(log))["runs"]  # read back as a reader of the file would
+    result = runs[0]["results"][0]
     assert result["baselineState"] == "new" and result["ruleIndex"] == 0
     assert result["partialFingerprints"] == {FINGERPRINT: fingerprint("r/x", "a.py", "f")}
     assert result["locations"][0]["physicalLocation"]["region"] == {"startLine": 4, "endLine": 4}
-    assert log["runs"][1]["results"] == []  # type: ignore[index]
+    assert runs[1]["results"] == []
 
 
 def test_a_finding_of_a_rule_the_run_does_not_list_is_refused() -> None:

@@ -132,12 +132,13 @@ What the lines mean (CrossHair 0.0.111, measured 2026-10-04):
   when it spans lines). Read its sentence there.
 - `share.py:9: error: ZeroDivisionError:  when calling share(0, 0)`: the body raised for an input
   the preconditions allow; the line is in the body.
-- `--report-all` only: `info: Confirmed over all paths.` is a total proof of that condition;
-  `info: Not confirmed.` means no counterexample within the bound, not a proof; `info: Unable to
-  meet precondition.` means CrossHair found no input that meets the preconditions within the bound,
-  either because none exists (they contradict each other) or because the solver could not find
-  one, so nothing behind them was checked. The gate with `--report-all` fails on that line; without
-  it, that case exits 0 in silence.
+- On every run (`--report-all` is accepted and changes nothing): `info: Confirmed over all paths.`
+  is a total proof of that condition; `info: Not confirmed.` means no counterexample within the
+  bound, not a proof; `info: Unable to meet precondition.` means CrossHair found no input that
+  meets the preconditions within the bound, either because none exists (they contradict each
+  other) or because they are stated over values it cannot build (restate them over an enum), so
+  nothing behind them was checked. The gate fails on that line, and counts the three verdicts
+  under each target and, as its last line before the verdict, over the run.
 
 The gate is green on "Not confirmed". Say "no counterexample within N s per condition", N the
 declared `per_condition_timeout`, unless the line says "Confirmed over all paths". The bound is

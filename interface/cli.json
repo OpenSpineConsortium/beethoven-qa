@@ -5,19 +5,19 @@
  },
  "commands": {
   "gate": {
-   "summary": "every public function of the package carries contracts, and CrossHair + Z3 find no counterexample within the declared bound",
+   "summary": "every public function of the package carries contracts, nothing in the package or its tests sets a finding or a test aside, and CrossHair + Z3 find no counterexample within the declared bound; every condition's verdict is printed and counted",
    "arguments": {},
    "options": {
     "--root": "DIR: the repository root (default: .)",
     "--module": "DOTTED: only this module of the package",
-    "--report-all": "print every condition's verdict; a precondition no input can meet fails the gate"
+    "--report-all": "accepted and without effect: every run prints every condition's verdict, counts them under each target (gate: <target>: <c> confirmed over all paths, <n> not confirmed within <T> s, <u> unable to meet a precondition) and over the run (gate: conditions: <c> of <m> confirmed over all paths, <n> not confirmed within <T> s per condition, <u> unable to meet a precondition, the last line before the verdict), and fails on a precondition no input can meet"
    },
    "environment": {
     "BEETHOVEN_QA_JOBS": "lowers the number of CrossHair processes at a time (the allocation's cores); never raises it"
    },
    "exit": {
     "0": "both checks passed",
-    "1": "a finding: a public function without contracts, a counterexample, a directive, an unproven entry that names no contracted function, or anything else the gate refuses (CrossHair's own exit code when CrossHair itself failed)",
+    "1": "a finding: a public function without contracts, a counterexample, a precondition no input can meet, a directive, a suppression comment or a skipped test in the package or its tests directory, an unproven entry that names no contracted function, or anything else the gate refuses (CrossHair's own exit code when CrossHair itself failed)",
     "2": "the [tool.beethoven-qa] table cannot be used, or --module names no checked module of the package"
    }
   },

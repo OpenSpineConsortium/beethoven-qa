@@ -42,7 +42,8 @@ def _gate_parser(g: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--report-all",
         action="store_true",
-        help="print every condition's verdict; a precondition no input can meet fails the gate",
+        help="accepted and without effect: every run prints every condition's verdict and fails "
+        "on a precondition no input can meet",
     )
 
 
@@ -130,7 +131,8 @@ def _gate(args: argparse.Namespace) -> int:
     if args.module is not None and not args.module.startswith(config.package):
         print(f"gate: {args.module} is not part of {config.package}")
         return 2
-    return gate._run(args.root.resolve(), args.module, args.report_all)
+    # --report-all is accepted for the workflow scripts that pass it; it is the default.
+    return gate._run(args.root.resolve(), args.module)
 
 
 def _standards(args: argparse.Namespace) -> int:

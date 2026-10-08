@@ -5,6 +5,8 @@ behaviour a reader expects, show each layer refusing what it should, and would c
 that was weakened by mistake.
 """
 
+from typing import Any
+
 import pytest
 from beartype.roar import BeartypeCallHintParamViolation
 from pydantic import ValidationError
@@ -39,8 +41,9 @@ def test_remaining_refuses_negative_usage_and_empty_window() -> None:
 
 
 def test_beartype_refuses_wrong_types() -> None:
+    wrong: Any = "40"  # a string where the signature says int: what beartype is there to catch
     with pytest.raises(BeartypeCallHintParamViolation):
-        remaining("40", 100)  # type: ignore[arg-type]
+        remaining(wrong, 100)
 
 
 def test_window_boundary_validation() -> None:
@@ -52,5 +55,5 @@ def test_window_boundary_validation() -> None:
         Window(used=0, cap=0)
     with pytest.raises(ValidationError):
         Window(used=201, cap=100)  # a bad reading, not a saturated window
-    with pytest.raises(ValidationError):
-        Window(used=1, cap=100, extra=1)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):  # a field the model does not declare, as a file would
+        Window.model_validate({"used": 1, "cap": 100, "extra": 1})
