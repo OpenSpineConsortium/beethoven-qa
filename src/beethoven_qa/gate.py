@@ -739,36 +739,41 @@ def _jobs() -> int:
     return cores
 
 
+def _said(
+    target: str, result: subprocess.CompletedProcess[str], timeout: int
+) -> tuple[Verdicts, list[str]]:
+    # What CrossHair said of one target, printed under its exit line with the count of its
+    # verdicts, and what that output shows the gate must refuse.
+    output = (result.stdout + result.stderr).strip()
+    counts = verdicts(output)
+    print(f"gate: {target}: exit {result.returncode}")
+    print(
+        f"gate: {target}: {counts.confirmed} confirmed over all paths, {counts.unconfirmed} "
+        f"not confirmed within {timeout} s, {counts.unmet} unable to meet a precondition"
+    )
+    if output:
+        print(output)
+    problems: list[str] = []
+    if result.returncode == 0 and _NOTHING_TO_CHECK in output:
+        problems.append(f"CrossHair found nothing to check in {target}, which has contracts")
+    if counts.unmet:
+        problems.append(f"{target}: {_VACUOUS}")
+    return counts, problems
+
+
 def _report(
     targets: list[str], results: list[subprocess.CompletedProcess[str]], timeout: int
 ) -> tuple[int, Verdicts, list[str]]:
-    # What CrossHair said of each target, printed under its exit line with the count of its
-    # verdicts: the first non-zero exit, the counts over every target, and what the output shows
-    # the gate must refuse.
+    # Every target's lines in order: the first non-zero exit, the counts over every target, and
+    # what the outputs show the gate must refuse.
     failed = 0
     totals = Verdicts(0, 0, 0)
     problems: list[str] = []
     for target, result in zip(targets, results, strict=True):
-        output = (result.stdout + result.stderr).strip()
-        counts = verdicts(output)
-        totals = Verdicts(
-            totals.confirmed + counts.confirmed,
-            totals.unconfirmed + counts.unconfirmed,
-            totals.unmet + counts.unmet,
-        )
-        print(f"gate: {target}: exit {result.returncode}")
-        print(
-            f"gate: {target}: {counts.confirmed} confirmed over all paths, {counts.unconfirmed} "
-            f"not confirmed within {timeout} s, {counts.unmet} unable to meet a precondition"
-        )
-        if output:
-            print(output)
-        if result.returncode != 0:
-            failed = failed or result.returncode
-        elif _NOTHING_TO_CHECK in output:
-            problems.append(f"CrossHair found nothing to check in {target}, which has contracts")
-        if counts.unmet:
-            problems.append(f"{target}: {_VACUOUS}")
+        counts, found = _said(target, result, timeout)
+        totals = Verdicts(*(sum(pair) for pair in zip(totals, counts, strict=True)))
+        failed = failed or result.returncode
+        problems.extend(found)
     return failed, totals, problems
 
 
