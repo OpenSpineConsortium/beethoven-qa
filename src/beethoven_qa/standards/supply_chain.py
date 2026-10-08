@@ -9,7 +9,9 @@ under ``.github/workflows/``, the way Scorecard defines them:
 - **Pinned-Dependencies**: every action a workflow uses, step or reusable workflow, is pinned to a
   full 40-character commit, never a tag or a branch that can be moved; a local action
   (``./path``) and a container pinned by its ``sha256`` digest are pinned. A download piped into a
-  shell (``curl ... | sh``) runs whatever the server sends that day and is refused.
+  shell (``curl ... | sh``) runs whatever the server sends that day and is refused; so is a file a
+  step fetches with curl or wget and then runs, installs, unpacks or chmods without a sha256 check
+  in the same step (``sha256sum -c``, or a comparison with a 64-hex digest written there).
 - **Token-Permissions**: every workflow declares top-level ``permissions`` that grant no write; a
   job that needs to write says so on the job.
 - **Dangerous-Workflow**: a workflow started by ``pull_request_target`` or ``workflow_run`` runs
@@ -17,36 +19,74 @@ under ``.github/workflows/``, the way Scorecard defines them:
   and no ``run`` script expands an expression an outsider controls (an issue's or a pull request's
   title or body, a branch name, a commit message), which would let that text run as shell.
 
+Beside this reader, zizmor (the established auditor of workflow files) runs over the same files at
+its regular persona, offline, with its ignore comments and configuration files not honoured
+(``--no-ignores --no-config``: an inline ``zizmor: ignore[...]`` comment or a ``zizmor.yml``
+silences and loosens nothing, the rule every group keeps). Each of its findings is a result of its
+own run in the
+group's log, ``zizmor/<audit>``, at the line of the finding's primary location and anchored to
+that line's text; one of **High or Medium severity** is an error and blocks when the change made
+it, a Low or Informational one is a note. Measured 2026-10-08 with zizmor 1.30.1: its JSON counts
+rows from 0 where its plain output and GitHub count lines from 1; a file it cannot read as a
+workflow it passes over with a warning, as the reader passes over one that does not parse; and on
+this repository's own workflows it reports one Low, ``adhoc-packages`` for the ``npm install -g``
+of the Claude Code CLI, which has no lockfile to pin it (recorded, accepted).
+
 Scorecard's other checks (branch protection, code review, signed releases, a security policy and
 others) read GitHub's settings, not files; this repository's rulesets as code
-(``.github/rulesets/main.json``) are its own record of the first.
+(``.github/rulesets/main.json``) are its own record of the first. Scorecard itself runs over the
+tree in CI as a report that never blocks (the job ``scorecard (report)`` of ``standards.yml``;
+``docs/STANDARDS.md`` says why).
 """
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import NamedTuple
 
 import yaml
 from beartype import beartype
+from pydantic import BaseModel, ConfigDict
 
 from beethoven_qa import __version__
 from beethoven_qa.contracts import ensure
 from beethoven_qa.standards.findings import Finding, blocking
-from beethoven_qa.standards.group import Context, Group, Report, _compare
+from beethoven_qa.standards.group import (
+    Context,
+    Group,
+    Report,
+    _bin,
+    _compare,
+    _tool,
+    _version,
+)
 from beethoven_qa.standards.sarif import Rule, Run
 
-__all__ = ["GROUP", "RULES", "grants_write", "pinned", "pipes_to_shell", "untrusted"]
+__all__ = [
+    "BLOCKING",
+    "GROUP",
+    "RULES",
+    "grants_write",
+    "level_for",
+    "pinned",
+    "pipes_to_shell",
+    "unchecked_download",
+    "untrusted",
+]
 
 GROUP = Group(
     "supply-chain",
     "the workflows that build, test and merge",
-    "OpenSSF Scorecard's checks of workflow files",
+    "OpenSSF Scorecard's checks of workflow files, and zizmor's audits",
 )
 
 WORKFLOWS = ".github/workflows"
+BLOCKING = ("Medium", "High")  # zizmor's severities that make a finding an error
 _SCORECARD = "https://github.com/ossf/scorecard/blob/main/docs/checks.md"
+_ZIZMOR = "https://docs.zizmor.sh/audits/"
+_TAGS = ("security", "supply-chain")
 
 
 def _rule(key: str, name: str, text: str, check: str) -> Rule:
@@ -56,7 +96,7 @@ def _rule(key: str, name: str, text: str, check: str) -> Rule:
         text,
         f"OpenSSF Scorecard, {check}.",
         f"{_SCORECARD}#{check.lower()}",
-        ("security", "supply-chain"),
+        _TAGS,
     )
 
 
@@ -73,6 +113,13 @@ RULES: dict[str, Rule] = {
             "pipe-to-shell",
             "PipeToShell",
             "No download is piped into a shell.",
+            "Pinned-Dependencies",
+        ),
+        _rule(
+            "unchecked-download",
+            "UncheckedDownload",
+            "A file a step fetches and then runs, installs, unpacks or chmods is checked against a "
+            "sha256 digest in that step.",
             "Pinned-Dependencies",
         ),
         _rule(
@@ -99,6 +146,26 @@ RULES: dict[str, Rule] = {
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"docker://[^@\s]+@sha256:[0-9a-f]{64}")
 _PIPE = re.compile(r"\b(curl|wget)\b[^|\n;&]*\|\s*(sudo\s+)?(-?\w+\s+)*(ba|da|z|k)?sh\b")
+# A curl or wget whose output is a file: curl with -o, -O, --output or --remote-name among its
+# flags or its output redirected, wget unless it writes to stdout (-O-, -qO-, -O -). A command
+# runs to a pipe, a semicolon, an ampersand or the end of its line, a backslash-newline included.
+_FETCH = re.compile(
+    r"\bcurl\b(?:[^\n|;&]|\\\n)*(?:\s-[A-Za-z]*[oO]\b|\s--(?:output|remote-name)\b|\s>)"
+    r"|\bwget\b(?!(?:[^\n|;&]|\\\n)*-[A-Za-z]*O\s*-(?=\s|$))"
+)
+_COMMAND_END = re.compile(r"[|;&]|(?<!\\)\n")
+# What a step does with the file it fetched: makes it executable, installs, moves or unpacks it,
+# or runs it, by a path or through a shell or an interpreter.
+_USE = re.compile(
+    r"\b(?:chmod|install|mv|cp|tar|unzip|gunzip|unxz|sudo|bash|sh|zsh|python3?|node|perl)\b"
+    r"|(?:^|[\s;&|(])\.?/\S+",
+    re.MULTILINE,
+)
+# A digest check: sha256sum or shasum -a 256 told to check (-c, --check), or a 64-hex digest
+# written in the step for a comparison.
+_CHECKED = re.compile(
+    r"\b(?:sha256sum|shasum\s+-a\s*256)\b[^\n|;&]*\s(?:-\w*c\w*|--check)\b|\b[0-9a-f]{64}\b"
+)
 _EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
 # GitHub's own list of untrusted input, from its security hardening guide for Actions.
 _UNTRUSTED = re.compile(
@@ -169,6 +236,36 @@ def pipes_to_shell(script: str) -> bool:
     return _PIPE.search(script) is not None
 
 
+@beartype
+@ensure(
+    lambda result, script: not result or _FETCH.search(script) is not None,
+    "a report needs a curl or wget that writes a file",
+)
+@ensure(
+    lambda result, script: not result or _CHECKED.search(script) is None,
+    "a step that checks a digest is never reported",
+)
+def unchecked_download(script: str) -> bool:
+    """Whether ``script`` fetches a file with curl or wget and goes on to run, install, unpack or
+    chmod something, with no sha256 check anywhere in the same step."""
+    fetch = _FETCH.search(script)
+    if fetch is None or _CHECKED.search(script) is not None:
+        return False
+    end = _COMMAND_END.search(script, fetch.start())
+    return _USE.search(script, end.start() if end else len(script)) is not None
+
+
+@beartype
+@ensure(lambda result: result in ("error", "note"), "an error or a note")
+@ensure(
+    lambda result, severity: (result == "error") == (severity in BLOCKING),
+    "an error exactly for a High or Medium severity; any other word, a note",
+)
+def level_for(severity: str) -> str:
+    """The SARIF level of a zizmor finding of this severity."""
+    return "error" if severity in BLOCKING else "note"
+
+
 class _Where(NamedTuple):
     path: str
     text: str
@@ -225,6 +322,12 @@ def _unpinned(where: _Where, uses: object) -> list[Finding]:
     return []
 
 
+def _download(script: str) -> str:
+    # The download command as the step writes it, to the end of its line: the finding's needle.
+    fetch = _FETCH.search(script)
+    return script[fetch.start() if fetch else 0 :].split("\n", 1)[0].strip()
+
+
 def _script(where: _Where, run: object) -> list[Finding]:
     if not isinstance(run, str):
         return []
@@ -241,6 +344,12 @@ def _script(where: _Where, run: object) -> list[Finding]:
     if pipes_to_shell(run):
         why = "a download is piped into a shell"
         found.append(_finding(where, "pipe-to-shell", "|", why))
+    if unchecked_download(run):
+        why = (
+            "a download is run, installed, unpacked or chmodded without a digest check in its "
+            "step; check it with sha256sum -c first"
+        )
+        found.append(_finding(where, "unchecked-download", _download(run), why))
     return found
 
 
@@ -284,21 +393,152 @@ def _workflow(where: _Where) -> list[Finding]:
     return found
 
 
-def _findings(tree: Path) -> tuple[Finding, ...]:
+def _texts(tree: Path) -> dict[str, str]:
+    # The workflow files, by their path relative to the tree, in a stable order; a link is never
+    # read.
     home = tree / WORKFLOWS
     if not home.is_dir():
-        return ()
-    found: list[Finding] = []
-    for path in sorted(p for p in home.glob("*.y*ml") if p.is_file() and not p.is_symlink()):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        found += _workflow(_Where(path.relative_to(tree).as_posix(), text))
+        return {}
+    files = sorted(p for p in home.glob("*.y*ml") if p.is_file() and not p.is_symlink())
+    return {p.relative_to(tree).as_posix(): p.read_text("utf-8", errors="replace") for p in files}
+
+
+def _findings(tree: Path) -> tuple[Finding, ...]:
+    return tuple(f for rel, text in _texts(tree).items() for f in _workflow(_Where(rel, text)))
+
+
+class _Point(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    row: int  # from 0
+
+
+class _Span(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    start_point: _Point
+    end_point: _Point
+
+
+class _Concrete(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    location: _Span
+
+
+class _Symbolic(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    key: dict[str, dict[str, object]]  # {"Local": {"verbatim_path": ...}} for a file
+    annotation: str = ""
+    kind: str = "Primary"  # Primary, Related or Hidden
+
+
+class _Location(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    symbolic: _Symbolic
+    concrete: _Concrete
+
+
+class _Determinations(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    severity: str
+    confidence: str
+    persona: str
+
+
+class _Audit(BaseModel):
+    # One finding of zizmor's JSON (its v1 format): the fields read.
+    model_config = ConfigDict(extra="ignore")
+
+    ident: str
+    desc: str
+    url: str = _ZIZMOR
+    determinations: _Determinations
+    locations: list[_Location]
+
+
+def _zizmor(tree: Path, paths: list[str]) -> list[_Audit]:
+    # zizmor over the workflow files, offline, at the regular persona, its ignore comments and
+    # configuration files not honoured, and its exit code saying only whether it ran. A file it
+    # cannot read as a workflow it passes over with a warning; when every file is such it says it
+    # collected no input, which is no finding, not a failure.
+    if not paths:
+        return []
+    argv = [_bin("zizmor"), "--offline", "--no-ignores", "--no-config", "--no-exit-codes"]
+    argv += ["--no-progress", "--quiet", "--persona", "regular", "--format", "json", *paths]
+    out = _tool(argv, cwd=tree)
+    if out.returncode != 0:
+        if "no inputs collected" in out.stderr:
+            return []
+        raise RuntimeError(f"zizmor failed: {(out.stderr or out.stdout).strip()}")
+    raw = json.loads(out.stdout)
+    return [_Audit.model_validate(item) for item in raw] if isinstance(raw, list) else []
+
+
+def _audit_rule(audit: _Audit) -> Rule:
+    name = "".join(w.capitalize() for w in audit.ident.split("-") if w)
+    return Rule(
+        f"zizmor/{audit.ident}",
+        name or audit.ident,
+        f"zizmor {audit.ident}: {audit.desc}.",
+        "An audit of zizmor at its regular persona; a finding of High or Medium severity blocks "
+        "when the change made it, a Low or Informational one is recorded.",
+        audit.url,
+        _TAGS,
+    )
+
+
+def _audited(audit: _Audit, texts: dict[str, str]) -> Finding | None:
+    # The finding at the audit's primary location (the first location when none is marked so),
+    # anchored to the text of its line; one in a file that was not given is passed over.
+    place = next((loc for loc in audit.locations if loc.symbolic.kind == "Primary"), None)
+    place = place or (audit.locations[0] if audit.locations else None)
+    if place is None:
+        return None
+    local = place.symbolic.key.get("Local", {})
+    rel = Path(str(local.get("verbatim_path", ""))).as_posix()
+    if rel not in texts:
+        return None
+    span = place.concrete.location
+    line, end = span.start_point.row + 1, max(span.start_point.row, span.end_point.row) + 1
+    lines = texts[rel].splitlines()
+    anchor = " ".join(lines[line - 1].split()) if line <= len(lines) else ""
+    severity = audit.determinations.severity
+    message = f"{audit.desc}: {place.symbolic.annotation} ({severity.lower()} severity)"
+    rule = f"zizmor/{audit.ident}"
+    return Finding(rule, rel, line, end, anchor, 0, 0, level_for(severity), message, _TAGS)
+
+
+def _audits(tree: Path, rules: dict[str, Rule]) -> tuple[Finding, ...]:
+    # zizmor's findings, and in ``rules`` the rule each of them names.
+    texts = _texts(tree)
+    found = []
+    for audit in _zizmor(tree, sorted(texts)):
+        finding = _audited(audit, texts)
+        if finding is not None:
+            rules[finding.rule] = _audit_rule(audit)
+            found.append(finding)
     return tuple(found)
 
 
 def _check(context: Context) -> Report:
     head, states = _compare(context, _findings)
-    rules = tuple(RULES.values())
-    run = Run(GROUP.name, "beethoven-qa", __version__, _SCORECARD, rules, head, states)
-    stops = blocking(head, states)
-    summary = f"{len(head)} workflow findings in the tree, {len(stops)} new or worse"
-    return Report(GROUP.name, (run,), stops, not stops, summary)
+    seen: dict[str, Rule] = {}
+    audited, audit_states = _compare(context, lambda tree: _audits(tree, seen))
+    rules = tuple(seen[r] for r in sorted({f.rule for f in audited}))
+    version = _version([_bin("zizmor"), "--version"])
+    reader = tuple(RULES.values())
+    runs = (
+        Run(GROUP.name, "beethoven-qa", __version__, _SCORECARD, reader, head, states),
+        Run(GROUP.name, "zizmor", version, _ZIZMOR, rules, audited, audit_states),
+    )
+    stops = blocking(head + audited, states + audit_states)
+    notes = sum(1 for f in audited if f.level == "note")
+    summary = (
+        f"{len(head)} workflow findings of the reader and {len(audited) - notes} of zizmor's of "
+        f"medium or high severity in the tree, {len(stops)} new or worse; {notes} low ones recorded"
+    )
+    return Report(GROUP.name, runs, stops, not stops, summary)

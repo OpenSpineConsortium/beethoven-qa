@@ -17,21 +17,33 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ] && [ "${BEETHOVEN_SETUP_FORCE:-}" != 
 fi
 
 ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-# The pixi version the committed pixi.lock was produced with.
+# The pixi version the committed pixi.lock was produced with, and the sha256 of its release asset
+# pixi-x86_64-unknown-linux-musl: this repository's own measurement of 2026-10-08, from two
+# downloads at different times, equal to the binary the session that pinned the lock runs; pixi's
+# release publishes no checksum asset to compare with. A new pixi version means a new digest,
+# measured again the same way.
 PIXI_VERSION=0.81.0
+PIXI_SHA256=248510f5f75460a2ae4ec62d761e15c0191dc35db3b1da6f82d9f17c6017051d
 BIN="$HOME/.pixi/bin"
 mkdir -p "$BIN"
 
 if ! "$BIN/pixi" --version 2>/dev/null | grep -q "$PIXI_VERSION"; then
     url="https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl"
-    if curl -fsSL -o "$BIN/pixi.tmp" "$url"; then
-        chmod 0755 "$BIN/pixi.tmp" && mv "$BIN/pixi.tmp" "$BIN/pixi"
-    else
+    # The digest is checked before the file is made executable or moved into place; a file that
+    # is not the one measured is removed, like one that did not arrive.
+    if ! curl -fsSL -o "$BIN/pixi.tmp" "$url"; then
         rm -f "$BIN/pixi.tmp"
         echo "session-start: could not fetch pixi ${PIXI_VERSION} from its release asset (refused by the" \
              "session's network?). The gate needs it: install pixi ${PIXI_VERSION}, then 'pixi install --locked'."
         exit 0
+    elif ! echo "$PIXI_SHA256  $BIN/pixi.tmp" | sha256sum --status -c -; then
+        rm -f "$BIN/pixi.tmp"
+        echo "session-start: the pixi ${PIXI_VERSION} fetched is not the one this repository measured" \
+             "(sha256 differs); it was removed. The gate needs it: install pixi ${PIXI_VERSION} yourself," \
+             "then 'pixi install --locked'."
+        exit 0
     fi
+    chmod 0755 "$BIN/pixi.tmp" && mv "$BIN/pixi.tmp" "$BIN/pixi"
 fi
 export PATH="$BIN:$PATH" PIXI_NO_PATH_UPDATE=1
 

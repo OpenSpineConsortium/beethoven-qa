@@ -419,8 +419,11 @@ on:
   workflow_dispatch:
 
 env:
-  # The pixi that produced the committed lock, fetched from its release asset by name.
+  # The pixi that produced the committed lock, fetched from its release asset by name, and the
+  # sha256 of that asset: beethoven-qa's own measurement of 2026-10-08 (pixi publishes no
+  # checksum asset). A new pixi version means a new digest, measured again.
   PIXI_VERSION: 0.81.0
+  PIXI_SHA256: 248510f5f75460a2ae4ec62d761e15c0191dc35db3b1da6f82d9f17c6017051d
 
 # Nothing writes; the supply-chain standard refuses a workflow without this, or one that grants a
 # write at the top.
@@ -438,9 +441,12 @@ jobs:
         with:
           persist-credentials: false
       - name: install pixi
+        # Checked against its digest before it is made executable or run (the supply-chain
+        # standard refuses a download a step runs, installs or chmods without such a check).
         run: |
           curl -fsSL -o /usr/local/bin/pixi \
             "https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl"
+          echo "${PIXI_SHA256}  /usr/local/bin/pixi" | sha256sum -c - || { rm -f /usr/local/bin/pixi; exit 1; }
           chmod 0755 /usr/local/bin/pixi
           pixi --version
       - name: reconstruct the environment from the lock
@@ -484,7 +490,7 @@ adds its image lane):
     {
       "type": "required_status_checks",
       "parameters": {
-        "strict_required_status_checks_policy": false,
+        "strict_required_status_checks_policy": true,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
           {
@@ -501,6 +507,13 @@ adds its image lane):
   ]
 }
 ```
+
+The policy is strict: a pull request whose branch fell behind `main` is not merged until it
+carries `main`, since the checks ran on a tree `main` would never hold (beethoven-qa measured on
+2026-10-08 that with the flag off, `main`'s tree after a merge was never what the checks ran on).
+Bringing the branch up to date is the session's own step (merge `main` in, gate, push); a push a
+bot makes with `GITHUB_TOKEN` starts no workflow, so no automation does it. The kit's
+`scorecard (report)` job is named by no rule: it reports and never blocks.
 
 The kit's `rulesets.yml` applies that file with the `RULESETS_TOKEN` secret, and the kit's
 `automerge.yml` arms auto-merge only once `main` carries a required-checks rule. So a new repository
