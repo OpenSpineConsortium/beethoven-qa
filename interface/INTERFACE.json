@@ -23,7 +23,7 @@
   {
    "id": "cli",
    "kind": "cli",
-   "version": 2,
+   "version": 3,
    "summary": "The commands of python -m beethoven_qa a consumer runs from its pinned copy (cli.json): gate, standards, coach, vendor, vendor-check, boundary and report, their options, their exit codes, and the [tool.beethoven-qa] table of pyproject.toml they read",
    "paths": [
     "interface/cli.json",
@@ -37,7 +37,7 @@
   {
    "id": "kit",
    "kind": "files",
-   "version": 1,
+   "version": 2,
    "summary": "The repository kit every consumer carries byte for byte at the same paths: the pre-push gate, the auto-merge, rulesets and standards workflows, and the cloud session's start hook. A consumer of the pinned copy takes it with vendor --kit and vendor-check compares it; the others copied it by hand and carry no record yet",
    "paths": [
     ".githooks/pre-push",

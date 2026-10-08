@@ -226,3 +226,17 @@ def test_a_finding_of_a_rule_the_run_does_not_list_is_refused() -> None:
     run = Run("group", "tool", "1.0.0", "https://example.invalid", (rule,), (_f("f", 1),), ("new",))
     with pytest.raises(ViolationError):
         sarif_log((run,))
+
+
+def test_a_tool_version_is_the_first_dotted_number_of_its_first_line() -> None:
+    # coverage.py says "Coverage.py, version 7.16.2 with C extension", so the last word is not the
+    # version (the log said "extension" until 5.0.0); ruff, bandit, mypy and jscpd put it last or
+    # before a parenthesis; radon and lizard print it alone. A tool that says none is "unknown".
+    from beethoven_qa.standards.group import _version_word
+
+    assert _version_word("Coverage.py, version 7.16.2 with C extension") == "7.16.2"
+    assert _version_word("ruff 0.16.10") == "0.16.10"
+    assert _version_word("mypy 2.4.0 (compiled: yes)") == "2.4.0"
+    assert _version_word("6.0.1") == "6.0.1"
+    assert _version_word("Changes") == "unknown"
+    assert _version_word("") == "unknown"
