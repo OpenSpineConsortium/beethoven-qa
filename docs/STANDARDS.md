@@ -91,8 +91,10 @@ finding of its own rule, `duplication/ignore-marker`, and a string holding it is
 and a `zizmor.yml` or `.github/zizmor.yml`, which could also loosen an audit's policy, is never
 read). A `# noqa`, a `# nosec`, a `# jscpd:ignore-start`, a `.bandit` file, a `ruff.toml`, a
 `.jscpd.json`, a `[tool.complexipy]` table, a `complexipy.toml` or a zizmor ignore changes nothing
-(`tests/test_standards_groups.py` pins each). There is no `[tool.beethoven-qa]` key for the
-standards: a limit changes only in a
+(`tests/test_standards_groups.py` pins each), and the gate refuses every such comment outright, in
+the package and in `tests/`, with its file and line, along with a test skipped or expected to fail
+(a string that spells one is no finding). There is no `[tool.beethoven-qa]` key for the standards:
+a limit changes only in a
 release of beethoven-qa, reviewed like any other change. The coverage group runs the repository's
 tests as the repository runs them (`pytest` from its root, its own pytest settings); if they fail
 under coverage, the group fails and says so.
@@ -209,7 +211,13 @@ bandit 1.9.4, coverage.py 7.16.2, ruff 0.16.10, CrossHair 0.0.111, git 2.43.
 - The symbolic gate grew from 10 targets to 32 and from about 2 to about 7 minutes on 4 cores; the
   conditions over unbounded tuples and strings run to their whole 20 s bound when no counterexample
   exists. CrossHair 0.0.111's symbolic frozenset refused `frozenset.intersection` called unbound
-  (`design.lcom4`'s condition is written with `&` instead, same meaning).
+  (`design.lcom4`'s condition is written with `&` instead, same meaning). On 2026-10-08, with 41
+  targets and every condition's verdict printed and counted on every run (until then only
+  `--report-all` showed them, and 107 of 117 conditions were at the bound): `gate: conditions: 11
+  of 121 confirmed over all paths, 110 not confirmed within 20 s per condition, 0 unable to meet a
+  precondition`, in 11 min 57 s wall time on 4 cores shared with two other sessions' test runs;
+  `security.level_for`, the one target whose precondition no input could meet, proves over all
+  paths now that its grades are an enum (CLAUDE.md, "Measured").
 - Two functions were broken on purpose before their contracts were trusted. `classify` marking an
   equal finding `updated`: CrossHair found the counterexample. `changed_lines` reading one line too
   many from each hunk: CrossHair found none within its bound (the input must be a well-formed diff),

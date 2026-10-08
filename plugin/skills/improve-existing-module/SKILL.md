@@ -114,8 +114,10 @@ fail.
   plausible wrong change there (drop a clamp, shift a bound by one, flip a comparison) and run
   CrossHair on the copy at the declared bound (the command for a copy is in the definition-of-done
   skill). No counterexample means a postcondition is missing for that failure.
-- **Preconditions that admit nothing**: an `Unable to meet precondition` line under the gate's
-  `--report-all`, which fails it; without that option the gate passes such a function in silence.
+- **Preconditions that admit nothing**: an `Unable to meet precondition` line, which fails the
+  gate on every run (`--report-all` is accepted and changes nothing); either the contract is
+  vacuous or it is stated over values CrossHair cannot build, such as a string held to a few
+  values, which an enum states instead.
 - **Preconditions narrower than what callers pass**, compared against step 1's list.
 
 ## 8. Report

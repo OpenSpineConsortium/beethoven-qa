@@ -19,8 +19,11 @@ import tempfile
 import textwrap
 import tokenize
 from pathlib import Path
+from typing import Any
 
 import pytest
+from beartype.roar import BeartypeCallHintParamViolation
+from pydantic import ValidationError
 
 from beethoven_qa.__main__ import main
 from beethoven_qa.standards import (
@@ -670,9 +673,28 @@ def test_a_weakness_the_base_held_is_recorded_and_passes(tmp_path: Path) -> None
 
 
 def test_security_levels() -> None:
-    assert security.level_for("HIGH", "MEDIUM") == "error"
-    assert security.level_for("MEDIUM", "LOW") == "note"
-    assert security.level_for("LOW", "HIGH") == "note"
+    grade = security.Grade
+    assert security.level_for(grade.HIGH, grade.MEDIUM) == "error"
+    assert security.level_for(grade.MEDIUM, grade.LOW) == "note"
+    assert security.level_for(grade.LOW, grade.HIGH) == "note"
+    # The callers pass the member; bandit's string is validated into it at the boundary, once.
+    spelled: Any = "HIGH"
+    with pytest.raises(BeartypeCallHintParamViolation):
+        security.level_for(spelled, grade.HIGH)
+    raw = {
+        "filename": "a.py",
+        "line_number": 1,
+        "line_range": [1],
+        "test_id": "B101",
+        "test_name": "assert_used",
+        "issue_severity": "HIGH",
+        "issue_confidence": "LOW",
+        "issue_text": "x",
+    }
+    issue = security._Issue.model_validate(raw)
+    assert issue.issue_severity is grade.HIGH and issue.issue_confidence is grade.LOW
+    with pytest.raises(ValidationError):
+        security._Issue.model_validate({**raw, "issue_severity": "SEVERE"})
 
 
 # --- supply chain -------------------------------------------------------------------------------
