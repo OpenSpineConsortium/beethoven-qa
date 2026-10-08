@@ -488,7 +488,8 @@ d = 4  # pragma: no cover
 e = 5  # ruff: noqa
 f = 6  # mypy: ignore-errors
 #lizard forgive
-h = 7  # GENERATED CODE, this comment says, and lizard would read no further
+h = 7  # this comment says GENERATED CODE mid-sentence, and lizard would read no further
+i = 8  # lizard forgive, says this comment, and lizard forgives nothing for it
 g = "# noqa and # type: ignore in a string"
 # the standards ignore a noqa anyway, as this comment says without carrying one
 """
@@ -521,11 +522,12 @@ def test_gate_refuses_suppressions_and_skipped_tests(tmp_path: Path) -> None:
         "# ruff: noqa",
         "# mypy: ignore-errors",
         "#lizard forgive",
-        "# GENERATED CODE, this comment says, and lizard would read no further",
+        "# this comment says GENERATED CODE mid-sentence, and lizard would read no further",
     ):
         line = _line(COMMENTED, comment)
         assert f"gate: suppression src/toy/logic.py:{line}: {comment}: {why}" in out, out
     assert "in a string" not in out and "without carrying one" not in out, out
+    assert "forgives nothing" not in out, out
     for name, needle in (
         ("pytest.importorskip", "importorskip"),
         ("pytest.mark.skip", "@pytest.mark.skip"),

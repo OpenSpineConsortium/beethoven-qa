@@ -688,11 +688,12 @@ _SUPPRESSION = re.compile(
     r"|jscpd\s*:\s*ignore"
     r"|zizmor\s*:\s*ignore"
     r"|complexipy\s*:\s*ignore"
-    # lizard reads these two in this case only: ``#lizard forgive`` drops the function the comment
-    # closes from its count and ``GENERATED CODE`` anywhere in a comment drops the rest of the file.
-    r"|(?-i:lizard forgive)"
-    r"|(?-i:GENERATED CODE)"
-    r")",
+    r")"
+    # lizard's two, read the way lizard reads them (its comment_counter), in this case only: a
+    # comment that opens with the first, the hash joined to the word, drops the function it closes
+    # from the count; the second anywhere in a comment drops the rest of the file.
+    r"|(?-i:\A#lizard forgive)"
+    r"|(?-i:GENERATED CODE)",
     re.IGNORECASE,
 )
 # The decorators and calls that keep a test from running or from counting.
