@@ -18,7 +18,7 @@ release).
 | - | - |
 | readability | cognitive complexity at most 15; cyclomatic complexity at most 10; at most 4 parameters (`self` and `cls` not counted); at most 25 lines of code in a function body (docstring, comments and blank lines not counted) |
 | design | per class: LCOM4 at most 1 (instance methods all joined through shared attributes of `self` or calls), DIT at most 5, CBO at most 14, WMC at most 50, RFC at most 50, NOC at most 10 |
-| duplication | at most 3% of the new lines inside a block of 10 lines and 100 tokens that occurs elsewhere in the package |
+| duplication | at most 3% of the new lines inside a block of 10 lines and 40 of jscpd's tokens that occurs elsewhere in the package (imports and docstrings compared with nothing); no comment holding `jscpd:ignore` |
 | coverage | the tests run at least 80% of the new lines that can run |
 | security | no new bandit finding of medium or high severity and confidence (`shell=True`, `eval`, unsafe YAML or pickle loading, weak hashes for security, binding to all interfaces, and the rest of bandit's list) |
 | supply chain | every action pinned to a full 40-character commit (`uses: owner/repo@<sha> # vX.Y.Z`); no download piped into a shell (`curl ... \| sh`); top-level `permissions:` that grant no write (a job that writes says so on the job); no `${{ github.event.* }}` an outsider controls inside a `run:` script (pass it through `env:`); no checkout of a pull request's head under `pull_request_target` or `workflow_run` |
