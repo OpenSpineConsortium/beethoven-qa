@@ -136,8 +136,11 @@ A group blocks only what the change made: findings are matched with the base com
 file and anchor (a qualified name or a line's text, never a line number) and only `new` or
 `updated` errors block; duplication and coverage read the new lines git reports. No setting,
 configuration file or suppression comment of a repository loosens a limit; a limit changes only in
-a release. The coaching for a session is the `code-standards` skill; a hook that runs the cheap
-groups as a session edits (Claude Code's `PostToolUse`) is the next step and is not built.
+a release. The coaching for a session is the `code-standards` skill and, from 4.0.0, the plugin's
+`PostToolUse` hook: after every `Edit` or `Write` it runs `python -m beethoven_qa coach`, which says
+beside the edit what CI would block in that file (the cheap groups, never coverage), or nothing;
+it never stops an edit and never fails a session (`docs/STANDARDS.md`, "For a session writing
+code"). This repository's `.claude/settings.json` names the same script for sessions working here.
 
 Never skip, disable or quarantine a test, loosen a symbolic bound, remove a contract, narrow a
 precondition to exclude an input the callers really pass, add a `# crosshair:` directive, exempt
@@ -194,6 +197,13 @@ that states the function's real domain, which no caller ever leaves, is not dodg
 - `beethoven_qa.standards` and `python -m beethoven_qa standards <group>|all [--base <ref>|auto|none]
   [--sarif DIR]`: the code standards (`docs/STANDARDS.md`). Exit 0 when every group asked for
   passed, 1 when one did not, 2 when one could not run.
+- `beethoven_qa.standards.coach` and `python -m beethoven_qa coach [--root DIR]` (from 4.0.0): the
+  command behind the plugin's `PostToolUse` hook (`plugin/hooks/hooks.json`, `coach.sh`). It reads
+  Claude Code's call on stdin and prints the hook's JSON (`decision: block` and the findings that
+  would block in CI in the edited file, against the `auto` base) or nothing; exit 0 always. The
+  script runs it with `pixi run --as-is` in the project's own environment and ends quietly on
+  anything missing (no pixi, no environment, an older copy). Measured 2026-10-08: 2.8 s per edit
+  on this package, 2.5 s on beethoven-agents'.
 - `beethoven_qa.boundary` and `python -m beethoven_qa boundary [--root DIR]` (from 2.0.0): the five
   rules of the Beethoven interface standard
   ([INTERFACES.md](https://github.com/OpenSpineConsortium/beethoven/blob/main/INTERFACES.md)) over
@@ -221,7 +231,8 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   design. Release 2.0.0 adds `standards.yml` and changes `automerge.yml` and `rulesets.yml` (actions
   pinned to a commit, writes granted on the job only).
 - `plugin/` and `.claude-plugin/marketplace.json`: the Claude Code plugin `beethoven-qa` (skills,
-  the `stream` agent, the workflows `gate-until-green`, `verify-module`, `improve-module`). On a
+  the `stream` agent, the workflows `gate-until-green`, `verify-module`, `improve-module`, and from
+  4.0.0 the code standards' `PostToolUse` hook under `plugin/hooks/`). On a
   laptop: `/plugin marketplace add OpenSpineConsortium/beethoven-qa`, then
   `/plugin install beethoven-qa@beethoven-qa`; for work inside this checkout,
   `claude --plugin-dir plugin`. On the grid the agents' image registers the copy as a `directory`
@@ -346,7 +357,7 @@ tree with uncommitted or untracked files: commit everything first.
   the runner).
 - `tests/` — pytest under typeguard's import hook; `test_hooks.py` runs the kit's real pre-push
   hook with a stub pixi, a bare remote and a linked worktree.
-- `plugin/` — the Claude Code plugin; `.claude-plugin/marketplace.json` — the marketplace listing it.
+- `plugin/` — the Claude Code plugin (`hooks/` holds the coaching hook); `.claude-plugin/marketplace.json` — the marketplace listing it.
 - `tools/check_workflows.mjs` — CI's check of the workflow scripts against the runtime's rules
   (the meta literal and what follows it, the clock and randomness with every `\u` escape refused,
   module loading, `new.target`, both grammars); `tools/check_workflows.test.mjs` — its tests, and

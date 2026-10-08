@@ -103,9 +103,29 @@ is not bought.
 
 The plugin's `code-standards` skill (`plugin/skills/code-standards/SKILL.md`) says how to write a
 function that clears these limits the first time, and how to read and answer a failure: run the
-one group that failed, read its blocking lines, change the code, never the limit. The feedback a
-session gets today is the command and the pre-push hook; a hook that runs the cheap groups on the
-file a session has just edited (Claude Code's `PostToolUse`) is the next step and is not built.
+one group that failed, read its blocking lines, change the code, never the limit.
+
+From 4.0.0 the plugin also says it at once. Its `PostToolUse` hook (`plugin/hooks/hooks.json`)
+runs `plugin/hooks/coach.sh` after every `Edit` or `Write`, which runs
+`python -m beethoven_qa coach` in the project's own environment (`pixi run --as-is`, never an
+install). The command reads Claude Code's call on stdin, runs the groups cheap enough for every
+edit (readability, design, duplication and security for a module of the package, supply chain for
+a workflow file; never coverage, which runs the tests) against the base CI uses (`auto`), and
+answers with the findings that would block in CI **in the file just edited**, as the hook's JSON:
+`decision: block` with a `reason` listing them (twelve at most, the rest counted). Claude Code puts
+that beside the edit's result for the session to read; the edit has already happened and stays,
+and nothing is stopped. A file nothing would block, a file outside the package and the workflows,
+an older pinned copy without `coach`, no pixi, no installed environment, no base to tell (no
+remote): each gets no answer at all and exit 0, so the hook never stands in a session's way. The
+limits are the pinned copy's, the same CI applies; CI still decides.
+
+Where the hook runs: wherever the plugin is enabled (a laptop's `/plugin install`, `claude
+--plugin-dir plugin`). This repository's own `.claude/settings.json` names the same script for a
+session working here, which does not load the plugin; a consumer whose sessions do not load the
+plugin can name `vendor/beethoven-qa/plugin/hooks/coach.sh` the same way (`docs/CONSUMING.md`).
+Under managed settings with `allowManagedHooksOnly` (the agents' image), Claude Code blocks plugin
+hooks unless the plugin is force-enabled in the managed `enabledPlugins` (the hooks reference, read
+2026-10-08); whether the image's registration does that is not yet measured.
 
 ## What is not here, and why
 
@@ -154,11 +174,25 @@ bandit 1.9.4, coverage.py 7.16.2, ruff 0.16.10, CrossHair 0.0.111, git 2.43.
   equal finding `updated`: CrossHair found the counterexample. `changed_lines` reading one line too
   many from each hunk: CrossHair found none within its bound (the input must be a well-formed diff),
   and the tests failed on the postcondition that ties every range to a hunk header in the text.
+- On 2026-10-08 (same session size, the same tools; beethoven-qa 3.0.0's package): the readability
+  group took 5 s, nine tenths of it parsing each module again for every finding in it
+  (`dict.setdefault` builds its default before it looks: 518 parses where about 25 do); parsed once
+  per module, 1.6 s. The security group's anchors did the same per bandit finding and now parse
+  once per module too. `coach` on an edit of this package, the four cheap groups each in a thread
+  of its own, took 2.8 s from the hook's `pixi run --as-is` to the answer (4.1 s one group after
+  another); on beethoven-agents' package at its `main` (nine modules, 48 old readability
+  findings), 2.5 s.
+- The hook script was broken on purpose before its tests were trusted: without `|| exit 0` an
+  older copy's argparse refusal (exit 2) came through, and with the last test inverted an empty
+  answer printed an empty line; the tests failed on each (`tests/test_coach_hook.py`).
 
 ## Not yet measured
 
-- `standards.yml` on GitHub's runners, and its required check on `main`.
-- The groups in beethoven-agents and the research pipeline: their new dependency lines, their lock
-  and their tests under coverage (agents' 277 tests).
+- The groups in beethoven-agents and the research pipeline on GitHub's runners: both took 2.0.0
+  and then 3.0.0 on 2026-10-07 through pull requests that merged, but their runs were not read
+  here, nor their tests under coverage (agents' 277).
+- The hook inside a live Claude Code session: the script and the command are tested with the
+  hook's input shape and a stub pixi, and `claude plugin validate` passes, but no session has yet
+  been seen reading an answer beside its edit.
 - How long the coverage group takes on a large test suite, and whether the pre-push gate should
   leave it to CI there.

@@ -46,6 +46,18 @@
     "2": "a group could not run: a tool failed, git could not tell the base, or the [tool.beethoven-qa] table cannot be used"
    }
   },
+  "coach": {
+   "summary": "for Claude Code's PostToolUse hook (plugin/hooks/): reads the hook's call as JSON on stdin and prints, as the hook's JSON, what the cheap groups (all but coverage) would block in CI in the file the call edited, against the auto base; prints nothing when nothing would block or anything stands in the way",
+   "arguments": {},
+   "options": {
+    "--root": "DIR: the repository root (default: .)"
+   },
+   "environment": {},
+   "exit": {
+    "0": "always, answer or not: the answer is advice beside an edit that has already happened",
+    "2": "the command line itself was not understood (argparse); never for anything the hook hands it"
+   }
+  },
   "vendor": {
    "summary": "write the pinned copy of a release, read from GitHub through the person's own gh sign-in at a commit main contains, into a consuming repository",
    "arguments": {},

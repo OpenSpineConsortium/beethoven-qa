@@ -21,6 +21,18 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/plugin/hooks/coach.sh",
+            "timeout": 60
+          }
+        ]
+      }
     ]
   },
   "worktree": {

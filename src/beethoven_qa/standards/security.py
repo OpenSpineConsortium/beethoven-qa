@@ -98,10 +98,9 @@ def _run_bandit(tree: Path, package: str) -> list[_Issue]:
     return [_Issue.model_validate(raw) for raw in data.get("results", [])]
 
 
-def _anchor(source: str, line: int) -> str:
+def _anchor(source: str, defs: dict[int, tuple[str, int]], line: int) -> str:
     # The function around the line and the line's own text, whitespace collapsed: a finding that
-    # only moved keeps its anchor.
-    defs = _definitions(source)
+    # only moved keeps its anchor. ``defs`` are the module's definitions, parsed once per module.
     around = [name for start, (name, end) in sorted(defs.items()) if start <= line <= end]
     lines = source.splitlines()
     text = " ".join(lines[line - 1].split()) if 1 <= line <= len(lines) else ""
@@ -112,6 +111,7 @@ def _findings(tree: Path, package: str, rules: dict[str, Rule]) -> tuple[Finding
     # The findings, and in ``rules`` the rule each of them names.
     found = []
     sources = {rel: _read(tree, rel) for rel in _python_files(tree, package)}
+    defs: dict[str, dict[int, tuple[str, int]]] = {}
     for issue in _run_bandit(tree, package):
         rel = Path(issue.filename).resolve().relative_to(tree.resolve()).as_posix()
         cwe = issue.issue_cwe.get("id")
@@ -121,7 +121,9 @@ def _findings(tree: Path, package: str, rules: dict[str, Rule]) -> tuple[Finding
         end = max(issue.line_range or [issue.line_number])
         level = level_for(issue.issue_severity, issue.issue_confidence)
         message = f"{issue.issue_text} ({issue.issue_severity.lower()} severity, CWE-{cwe})"
-        anchor = _anchor(sources.get(rel, ""), issue.line_number)
+        if rel not in defs:
+            defs[rel] = _definitions(sources.get(rel, ""))
+        anchor = _anchor(sources.get(rel, ""), defs[rel], issue.line_number)
         found.append(Finding(rule, rel, issue.line_number, end, anchor, 0, 0, level, message, tags))
     return tuple(found)
 

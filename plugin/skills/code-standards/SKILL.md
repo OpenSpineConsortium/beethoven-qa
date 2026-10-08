@@ -49,6 +49,15 @@ release).
   pin it with the tag as a comment; put `permissions: contents: read` (or `{}`) at the top; pass any
   `github.event` text into a script through `env:` and quote it as `"$VAR"`.
 
+## When the hook speaks
+
+After an `Edit` or `Write`, the plugin's hook may put a note beside the result that begins
+`beethoven-qa <version>'s code standards would block this change in CI, in <file>:`, one finding
+per line in the same form as below. The edit has happened; nothing was undone. Fix each finding in
+that file now, while the code is in front of you, the same way as a failed group (step 3 below),
+and the next edit of the file is checked again. A note that does not come means nothing would
+block in that file, not that the hook ran: CI decides, and the full gate still runs before a push.
+
 ## When a group fails
 
 1. Run that group alone, against the same base, to iterate quickly:

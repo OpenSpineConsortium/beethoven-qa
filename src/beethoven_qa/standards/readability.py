@@ -155,8 +155,19 @@ def _relative(tree: Path, path: str) -> str:
     return (p.resolve().relative_to(tree.resolve()) if p.is_absolute() else p).as_posix()
 
 
+def _defs(
+    tree: Path, rel: str, cache: dict[str, dict[int, tuple[str, int]]]
+) -> dict[int, tuple[str, int]]:
+    # A module's definitions, parsed once per run: ``setdefault`` would parse the module again for
+    # every finding in it, since its default is built before it looks (measured 2026-10-08: 518
+    # parses for one run over this package, nine tenths of the readability group's time).
+    if rel not in cache:
+        cache[rel] = _definitions(_read(tree, rel))
+    return cache[rel]
+
+
 def _span(tree: Path, rel: str, line: int, cache: dict[str, dict[int, tuple[str, int]]]) -> Measure:
-    defs = cache.setdefault(rel, _definitions(_read(tree, rel)))
+    defs = _defs(tree, rel, cache)
     name, end = defs.get(line, (f"line {line}", line))
     return Measure("", rel, name, line, max(end, line), 0)
 
@@ -196,7 +207,7 @@ def _complexipy(tree: Path, files: list[str], package: str) -> list[Measure]:
     found = []
     for item in items:
         rel = _relative(tree, item.path)
-        defs = cache.setdefault(rel, _definitions(_read(tree, rel)))
+        defs = _defs(tree, rel, cache)
         name = item.function_name.replace("::", ".")
         line = next((n for n, (q, _) in sorted(defs.items()) if q == name), 1)
         end = defs.get(line, (name, line))[1]

@@ -44,8 +44,9 @@ The Claude Code plugin, on a laptop:
 ```
 
 It brings the skills `definition-of-done`, `write-verified-module`, `improve-existing-module`,
-`review-contracts` and `code-standards`, the `stream` agent and the workflows `/beethoven-qa:gate-until-green`,
-`/beethoven-qa:verify-module` and `/beethoven-qa:improve-module`.
+`review-contracts` and `code-standards`, the `stream` agent, the workflows `/beethoven-qa:gate-until-green`,
+`/beethoven-qa:verify-module` and `/beethoven-qa:improve-module`, and a hook that says at once what
+the code standards would block in each file a session edits (from 4.0.0).
 
 ## The definition of done
 
