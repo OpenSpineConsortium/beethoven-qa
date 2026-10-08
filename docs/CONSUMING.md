@@ -251,10 +251,13 @@ not one of its modules (a directory without `__init__.py`), a module that fails 
 being imported, a `# crosshair:` directive, a public coroutine (CrossHair would check the coroutine
 object, not its result), contracts on a pydantic model (CrossHair does not construct one), and a
 package with nothing to prove; and on what would hide a finding from the standards or a test
-from the run, in the package and in `tests/`: a suppression comment (`# noqa`, `# type: ignore`,
-`# nosec`, `# pragma: no cover`, `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`,
-lizard's `#lizard forgive` and `GENERATED CODE`) or a test skipped or expected to fail (pytest's
-and unittest's marks and calls).
+from the run, in the package and where pytest collects (`testpaths`, else `tests/`, and a root
+`conftest.py`): a suppression comment (`# noqa`, `# type: ignore`, `# nosec`, `# pragma: no
+cover`, `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`, the file-level `# ruff:
+noqa` and `# flake8: noqa`, every `# mypy:` configuration comment, isort's `skip`, `skip_file`
+and `off`, `# fmt: off` and `# fmt: skip`, lizard's `#lizard forgive` and `GENERATED CODE`), a
+test skipped or expected to fail (pytest's and unittest's marks, calls and exceptions wherever
+the name is written), or a `.pyi` stub beside a module, which mypy checks in the module's place.
 
 A function CrossHair must not run, because it reads, writes, asks the clock or the environment or
 starts a process, or cannot run, because of a fault of CrossHair's own that was measured, is named
@@ -730,10 +733,12 @@ dialog, which a cloud session never shows; no thread has tried it.
      `bee.handoff.extraction_prompt`, `bee.handoff.hydration_prompt`, `guard.check_path`).
      Restate such a contract over an enum (a `Literal` makes CrossHair 0.0.111 raise), or list the
      function under `[tool.beethoven-qa.unproven]` with that reason. The gate also refuses, in the
-     package and in `tests/`, every suppression comment (`# noqa`, `# type: ignore`, `# nosec`,
-     `# pragma: no cover`, `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`, the
-     file-level forms, lizard's `forgive` and `GENERATED CODE`) and every pytest or unittest skip
-     or expected failure: remove them and fix what they hid.
+     package and where pytest collects, every suppression comment (`# noqa`, `# type: ignore`,
+     `# nosec`, `# pragma: no cover`, `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy:
+     ignore`, the file-level forms, every `# mypy:` comment, isort's and the formatter's
+     markers, lizard's `forgive` and `GENERATED CODE`), every pytest or unittest skip or expected
+     failure however it is written, and a `.pyi` stub beside a module: remove them and fix what
+     they hid.
    - **The dependency lines.** Add `zizmor` and `lizard` (conda-forge) and `jscpd` (PyPI) as
      step 2 now shows them, and give the platform entry jscpd's glibc floor
      (`platforms = [{ name = "linux-64-glibc234", platform = "linux-64", glibc = "2.34" }]`); a

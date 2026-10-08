@@ -38,9 +38,12 @@ blank and comment lines among them), so a 10-line copy of average code holds abo
 13-line function that 4.0.0's token-window detector let through (its floor was 100 of its own
 tokens) holds 57, 48 in its first ten lines. So jscpd runs with `--min-lines 10 --min-tokens 40`:
 a 10-line copy of ordinary code is a clone (those ten lines are one; jscpd's own default of 50
-would miss them), a column of assignments or literals is not (ten `name = value` lines hold 35),
-and both must hold, so nine dense lines are not one either. Imports and docstrings are compared
-with nothing and counted as nothing, as before (compared, this package's two pairs of identical
+would miss them), a column of assignments or literals is not (ten `name = value` lines hold 30),
+and both must hold, so nine dense lines in a row are not one either. jscpd counts a clone's lines
+from its first token's line to its last token's, so the lines between count whatever they hold:
+blank ones, and the ones a docstring or an import held before the staging blanked them (measured,
+below). Imports and docstrings are compared with nothing and their tokens are counted as nothing,
+as before (compared, this package's two pairs of identical
 import blocks, 11 and 15 lines at 40 and 42 tokens, would be its only clones): jscpd reads a
 staged copy of the package's files with those lines blank, in its weak mode (comments set aside),
 and every module is compared with every other and with itself. A clone the base already held is
@@ -92,7 +95,7 @@ and a `zizmor.yml` or `.github/zizmor.yml`, which could also loosen an audit's p
 read). A `# noqa`, a `# nosec`, a `# jscpd:ignore-start`, a `.bandit` file, a `ruff.toml`, a
 `.jscpd.json`, a `[tool.complexipy]` table, a `complexipy.toml` or a zizmor ignore changes nothing
 (`tests/test_standards_groups.py` pins each), and the gate refuses every such comment outright, in
-the package and in `tests/`, with its file and line, along with a test skipped or expected to fail
+the package and where pytest collects, with its file and line, along with a test skipped or expected to fail
 (a string that spells one is no finding). There is no `[tool.beethoven-qa]` key for the standards:
 a limit changes only in a
 release of beethoven-qa, reviewed like any other change. The coverage group runs the repository's
@@ -263,8 +266,9 @@ On 2026-10-08, with jscpd 5.4.0 (the same session size):
 - 4.0.0's token-window detector (a block of 10 lines holding 100 of its own tokens, about 8.6 a
   line of code) let a 13-line verbatim copy of a plain function through; jscpd found it, as 57 of
   its tokens. On this package jscpd counts 7.4 tokens a line over all lines and 10.3 a line of code
-  (40946 tokens, 5569 lines, 3978 of them code), about a fifth more than Python's `tokenize` gives
-  for the same text (34366 names, operators, numbers and strings). Its weak mode leaves comments
+  (40946 tokens, 5569 lines, 3978 of them code), a quarter more than Python's `tokenize` gives
+  for the same text under the lock's Python 3.11.17 (32723 names, operators, numbers and strings;
+  Python 3.12's tokenizer, which splits f-strings, gives 34366). Its weak mode leaves comments
   out (two comments: two tokens fewer); its strict mode counts the whitespace too (79 against 45
   for an 11-line function).
 - At the floor (10 lines, 40 tokens) the package holds no clone once imports and docstrings are
@@ -370,8 +374,11 @@ On 2026-10-08, with jscpd 5.4.0 (the same session size):
   been seen reading an answer beside its edit.
 - How long the coverage group takes on a large test suite, and whether the pre-push gate should
   leave it to CI there.
-- Whether jscpd's columns count characters or bytes on a line that holds a non-ASCII character
-  before a copy starts; a side's anchor is cut by them, and is stable either way.
+- (Measured 2026-10-08, so no longer open: jscpd's columns count the bytes of the line's UTF-8,
+  not its characters. On a line holding `"éééé😀"` before a copy it reported column 19 where the
+  copy's character index was 11, so the group cuts a side's anchor as bytes. And two functions of
+  eight code lines with four blank lines after their `def` line are a 12-line clone of 78 tokens
+  at the floor: the blank lines count toward the ten.)
 - The `scorecard (report)` job on a GitHub runner: its steps were run here under a stub curl that
   delivers the wrong bytes (the digest check refuses and removes the file) and Scorecard itself on
   a clone of the tree, never the whole job on a runner; nor whether its Vulnerabilities and Fuzzing

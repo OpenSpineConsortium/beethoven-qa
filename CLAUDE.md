@@ -186,14 +186,18 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   on a precondition no input can meet, which is either a vacuous contract or one stated over values
   CrossHair cannot build (restate it over an enum, or list the function under `unproven` with that
   reason); `--report-all` is accepted and changes nothing. Check 1 also refuses, in the package
-  and in the repository's `tests/`, each with its file and line: every comment a standards' tool
-  would read as a suppression (`# noqa`, `# type: ignore`, `# nosec`, `# pragma: no cover`,
-  `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`, the file-level `# ruff: noqa`,
-  `# flake8: noqa` and `# mypy: ignore-errors`, and lizard's `#lizard forgive` and `GENERATED
-  CODE`), and every test skipped or expected to fail
-  (pytest's and unittest's marks and calls, however imported). A string that spells one is no
+  and where pytest collects (the directories `[tool.pytest.ini_options].testpaths` names, else
+  `tests/`, and a root `conftest.py`), each with its file and line: every comment a standards'
+  tool would read as a suppression (`# noqa`, `# type: ignore`, `# nosec`, `# pragma: no cover`,
+  `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`, the file-level `# ruff: noqa` and
+  `# flake8: noqa`, every `# mypy:` configuration comment, isort's `skip`, `skip_file` and `off`,
+  the formatter's `# fmt: off` and `# fmt: skip`, and lizard's `#lizard forgive` and `GENERATED
+  CODE`), every test skipped or expected to fail (pytest's and unittest's marks, calls and
+  exceptions wherever the name is written, a decorator, `pytestmark`, `pytest.param`,
+  `add_marker`, a `raise`, a case's `skipTest`, however imported), and a `.pyi` stub beside a
+  module, which mypy checks in the module's place (measured). A string that spells one is no
   finding, a pinned copy under `vendor/` is never read, and under `--module` only that module's
-  own file is.
+  own file and a stub beside it are.
 - `beethoven_qa.vendor`, `python -m beethoven_qa vendor --into <repo> --ref <tag> [--kit]` and
   `python -m beethoven_qa vendor-check [--source <beethoven-qa checkout>]`: the pinned copy at
   `vendor/beethoven-qa/`, with its `ORIGIN` record, and the check that the copy and the kit files

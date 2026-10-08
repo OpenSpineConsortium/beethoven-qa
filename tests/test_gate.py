@@ -91,8 +91,11 @@ def test_verdicts_count_crosshair_lines_and_nothing_else() -> None:
         "/r/b.py:12: error: false when calling f(1) (which returns 2)\n"
         "a checked function printed: Confirmed over all paths.\n"
         "/r/b.py:14: info: Not confirmed. (then more)\n"
+        # CrossHair's own form when the precondition raised: the reason follows, and ends the line.
+        '/r/c.py:4: info: Unable to meet precondition (possibly because it raised "KeyError(1)" '
+        'at   File "/r/c.py", line 3, in <lambda>?).\n'
     )
-    assert verdicts(text) == Verdicts(2, 1, 1)
+    assert verdicts(text) == Verdicts(2, 1, 2)
     assert verdicts("") == Verdicts(0, 0, 0)
     assert verdicts("Traceback (most recent call last):\n  File x\nTypeError: y\n") == Verdicts(
         0, 0, 0
@@ -464,6 +467,35 @@ def test_e() -> None:
 def test_f() -> None:
     text = "pytest.skip(x) @pytest.mark.skip # noqa # type: ignore # nosec"
     assert text
+
+
+pytestmark = pytest.mark.skipif(False, reason="a mark bound to the module, no call, no decorator")
+
+
+@pytest.mark.parametrize("v", [pytest.param(1, marks=pytest.mark.xfail)])
+def test_g(v: int) -> None:
+    assert v
+
+
+class Case(unittest.TestCase):
+    def test_h(self) -> None:
+        self.skipTest("a method of the case, no import to resolve")
+
+    @unittest.skip("x")
+    def test_i(self) -> None:
+        pass
+
+    @unittest.skipUnless(False, "x")
+    def test_j(self) -> None:
+        pass
+
+
+def test_k() -> None:
+    raise unittest.SkipTest("raised, not called as a skip")
+
+
+def test_l() -> None:
+    pytest.xfail("x")
 """
 
 # A module carrying each comment the standards' tools would read as a suppression, one string
@@ -487,6 +519,10 @@ d = 4  # pragma: no cover
 # complexipy: ignore
 e = 5  # ruff: noqa
 f = 6  # mypy: ignore-errors
+# flake8: noqa
+# mypy: disable-error-code="assignment"
+# isort: skip_file
+# fmt: off
 #lizard forgive
 h = 7  # this comment says GENERATED CODE mid-sentence, and lizard would read no further
 i = 8  # lizard forgive, says this comment, and lizard forgives nothing for it
@@ -521,6 +557,10 @@ def test_gate_refuses_suppressions_and_skipped_tests(tmp_path: Path) -> None:
         "# complexipy: ignore",
         "# ruff: noqa",
         "# mypy: ignore-errors",
+        "# flake8: noqa",
+        '# mypy: disable-error-code="assignment"',
+        "# isort: skip_file",
+        "# fmt: off",
         "#lizard forgive",
         "# this comment says GENERATED CODE mid-sentence, and lizard would read no further",
     ):
@@ -535,10 +575,17 @@ def test_gate_refuses_suppressions_and_skipped_tests(tmp_path: Path) -> None:
         ("unittest.skipIf", "@unittest.skipIf"),
         ("expectedFailure", "@expectedFailure"),
         ("pytest.skip", "pytest.skip("),
+        ("pytest.mark.skipif", "pytestmark ="),
+        ("pytest.mark.xfail", "marks=pytest.mark.xfail"),
+        ("self.skipTest", "self.skipTest("),
+        ("unittest.skip", "@unittest.skip("),
+        ("unittest.skipUnless", "@unittest.skipUnless("),
+        ("unittest.SkipTest", "raise unittest.SkipTest("),
+        ("pytest.xfail", "pytest.xfail("),
     ):
         line = _line(HIDDEN_TESTS, needle)
         assert f"gate: skip tests/test_hidden.py:{line}: {name}: a test is never skipped" in out
-    assert out.count("gate: skip ") == 6 and out.count("gate: suppression ") == 11, out
+    assert out.count("gate: skip ") == 13 and out.count("gate: suppression ") == 15, out
     assert "vendor" not in out, out
     assert "gate: instead of a suppression:" in out
 
@@ -549,7 +596,7 @@ def test_gate_refuses_suppressions_and_skipped_tests(tmp_path: Path) -> None:
     alone = _gate(root, "--module", "toy.logic")
     assert alone.returncode == 0 and "skip " not in alone.stdout, alone.stdout + alone.stderr
     whole = _gate(root)
-    assert whole.returncode == 1 and whole.stdout.count("gate: skip ") == 6, whole.stdout
+    assert whole.returncode == 1 and whole.stdout.count("gate: skip ") == 13, whole.stdout
 
 
 def test_this_repository_hides_nothing() -> None:
@@ -557,6 +604,36 @@ def test_this_repository_hides_nothing() -> None:
     # test: what the check refuses in a consumer, this repository is held to first.
     config = GateConfig.from_pyproject(SRC.parent)
     assert gate._hidden(gate._checked_files(SRC.parent, config, [], None), SRC.parent) == []
+
+
+def test_gate_refuses_a_stub_and_reads_where_pytest_collects(tmp_path: Path) -> None:
+    # A .pyi beside a module is what mypy checks in its place (measured: a module returning a str
+    # from an int function passed `mypy --strict` under a stub of the right signature), so the
+    # gate refuses it, under --module too. The skip check reads the directories
+    # [tool.pytest.ini_options].testpaths names and a conftest.py at the root, not "tests" by
+    # name, since pytest collects there.
+    root = _toy(
+        tmp_path,
+        {"__init__.py": "", "logic.py": PROVEN, "logic.pyi": "def double(x: int) -> int: ...\n"},
+        extra='\n[tool.pytest.ini_options]\ntestpaths = ["checks"]\n',
+    )
+    (root / "checks").mkdir()
+    (root / "checks" / "test_hidden.py").write_text(HIDDEN_TESTS, encoding="utf-8")
+    (root / "conftest.py").write_text(
+        "import pytest\n\n\ndef pytest_collection_modifyitems(items):\n"
+        "    for item in items:\n        item.add_marker(pytest.mark.skip)\n",
+        encoding="utf-8",
+    )
+    result = _gate(root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    out = result.stdout
+    assert f"gate: stub src/toy/logic.pyi: {gate._NO_STUB}" in out, out
+    assert out.count("gate: skip checks/test_hidden.py:") == 13, out
+    assert "gate: skip conftest.py:6: pytest.mark.skip: " in out, out
+    assert "gate: instead of a suppression:" in out
+    alone = _gate(root, "--module", "toy.logic")
+    assert alone.returncode == 1 and "gate: stub src/toy/logic.pyi: " in alone.stdout, alone.stdout
+    assert "skip " not in alone.stdout, alone.stdout
 
 
 def test_hidden_names_each_kind_once_and_a_file_it_cannot_read(tmp_path: Path) -> None:

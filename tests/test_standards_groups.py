@@ -397,6 +397,12 @@ def _block(name: str) -> str:
     return f"def {name}(values, offset):\n    total = 0\n{body}    return total\n"
 
 
+def _dense(name: str) -> str:
+    # Twelve lines of other text, as long and as dense: a different clone at the same place.
+    body = "".join(f"    total = a * {n} + b * {n + 1} - c / {n + 2}\n" for n in range(10))
+    return f"def {name}(a, b, c):\n{body}    return total\n"
+
+
 # The function the token-window detector let through on 2026-10-08: 13 lines holding 57 of
 # jscpd's tokens (4.4 a line) against its floor of 100. The first ten lines hold 48, fewer than
 # jscpd's own default floor of 50.
@@ -574,8 +580,43 @@ def test_the_ignore_marker_is_refused_and_hides_nothing(tmp_path: Path) -> None:
     assert len(report.runs[0].findings) == 4
 
 
-def test_a_jscpd_configuration_file_changes_nothing(tmp_path: Path) -> None:
+def test_a_clone_replaced_by_another_between_the_same_files_is_new(tmp_path: Path) -> None:
+    # The anchor is the other file and the text copied, so a clone of different text at the same
+    # place reads as new; an anchor of the other file alone would call it updated.
+    root = _repo(tmp_path, {})
+    _write(root, COPIES)
+    _commit_all(root, "copies")
+    _write(root, {f"{PKG}/copies.py": _dense("one") + "\n\n" + _dense("two")})
+    report = _check(root, "duplication")
+    assert not report.passed and set(_states(report).values()) == {"new"}, _states(report)
+    assert [f.line for f in report.blocking] == [1, 15]
+
+
+def test_a_copy_is_cut_by_jscpd_s_byte_columns() -> None:
+    # Measured 2026-10-08: jscpd reports the column of a copy's first and last character as the
+    # byte offset in the line's UTF-8, so on a line holding non-ASCII text before the copy the
+    # character index is smaller; the anchor's text must still be the copy's.
+    staged = 'xa = "\u00e9\u00e9\u00e9\u00e9\U0001f600"; total = 0\ntotal += 1\n'
+    side = duplication._Side.model_validate(
+        {
+            "name": "x.py",
+            "start": 1,
+            "end": 2,
+            "startLoc": {"line": 1, "column": 19},
+            "endLoc": {"line": 2, "column": 10},
+        }
+    )
+    assert duplication._copied(side, staged) == "; total = 0\ntotal += 1"
+    assert duplication._copied(side, "") == ""
+
+
+def test_a_jscpd_configuration_file_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Were it read, the file would ignore the copies, set the floors out of reach and allow 100%.
+    # jscpd reads .jscpd.json, .config/jscpd.json and package.json from its working directory
+    # only (measured 2026-10-08), so the test runs from the root that holds one: the group starts
+    # jscpd from an empty directory of its own, never from the directory it was started in.
     config = json.dumps(
         {
             "threshold": 100,
@@ -590,6 +631,7 @@ def test_a_jscpd_configuration_file_changes_nothing(tmp_path: Path) -> None:
     planted = {".jscpd.json": config, "src/.jscpd.json": config, f"{PKG}/.jscpd.json": config}
     root = _repo(tmp_path, planted)
     _write(root, COPIES)
+    monkeypatch.chdir(root)
     report = _check(root, "duplication")
     assert not report.passed and [f.line for f in report.blocking] == [1, 18]
 
@@ -677,6 +719,18 @@ def test_security_levels() -> None:
     assert security.level_for(grade.HIGH, grade.MEDIUM) == "error"
     assert security.level_for(grade.MEDIUM, grade.LOW) == "note"
     assert security.level_for(grade.LOW, grade.HIGH) == "note"
+    # Every pair, against bandit's ranking written out rather than the module's own constant,
+    # which the postcondition restates: the four blocking pairs and no other.
+    blocking = {
+        (grade.MEDIUM, grade.MEDIUM),
+        (grade.MEDIUM, grade.HIGH),
+        (grade.HIGH, grade.MEDIUM),
+        (grade.HIGH, grade.HIGH),
+    }
+    for severity in grade:
+        for confidence in grade:
+            expected = "error" if (severity, confidence) in blocking else "note"
+            assert security.level_for(severity, confidence) == expected, (severity, confidence)
     # The callers pass the member; bandit's string is validated into it at the boundary, once.
     spelled: Any = "HIGH"
     with pytest.raises(BeartypeCallHintParamViolation):

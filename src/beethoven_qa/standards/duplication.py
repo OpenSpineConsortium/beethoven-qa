@@ -18,9 +18,16 @@ average code holds about 74, and the 13-line function the token-window detector 
 replaced let through (its floor was 100) holds 57, 4.4 a line, 48 in its first ten lines. The floor
 of 40 is set so that a 10-line copy of ordinary code is a clone (those ten lines are one; jscpd's
 own default of 50 would miss them) and a column of assignments or literals is not (ten
-``name = value`` lines hold 35). Both conditions must hold, so nine dense lines are not a clone
-either, however many tokens they carry. Without the imports set aside, this package's two pairs of
-identical import blocks (11 and 15 lines, 40 and 42 tokens) would be its only clones at this floor.
+``name = value`` lines hold 30, three each; the tests' twelve-line function around ten of them
+holds 35). Both conditions must hold, so nine dense lines in a row are not a clone, however many
+tokens they carry. jscpd counts a clone's lines from its first token's line to its last token's,
+so the lines between them count whatever they hold: a blank line, and a line a docstring or an
+import held before the staging blanked it (measured 2026-10-08: two functions of eight code lines
+with four blank lines after their ``def`` line are a 12-line clone of 78 tokens at this floor).
+What the blanking takes away is the tokens, so a docstring never makes a block a clone, while the
+lines it stood on still count toward the ten. Without the imports set aside, this package's two
+pairs of identical import blocks (11 and 15 lines, 40 and 42 tokens) would be its only clones at
+this floor.
 
 Only the new lines count, the way SonarSource gates "new code": the density is the duplicated new
 lines over the new lines of the package (lines that hold code; a blank line, a comment, an import
@@ -328,12 +335,17 @@ def _blocks(clones: list[_Clone]) -> dict[str, tuple[Block, ...]]:
 def _copied(side: _Side, staged: str) -> str:
     # The text of one side of a clone as the staged copy holds it, from the copy's first character
     # to its last: what the side is anchored by, so a block that only moved keeps its anchor.
-    lines = io.StringIO(staged).readlines()[side.start - 1 : side.end]
+    # jscpd's columns count the bytes of the line's UTF-8 (measured 2026-10-08: on a line holding
+    # four accented letters and an emoji before the copy it said 19 where the copy's character
+    # index was 11), so the two ends are cut as bytes; a cut never falls inside a character,
+    # since a token boundary is one.
+    lines = [line.encode("utf-8") for line in io.StringIO(staged).readlines()]
+    lines = lines[side.start - 1 : side.end]
     if not lines:
         return ""
     lines[-1] = lines[-1][: side.endLoc.column]
     lines[0] = lines[0][side.startLoc.column :]
-    return "".join(lines)
+    return b"".join(lines).decode("utf-8", errors="replace")
 
 
 def _copies(

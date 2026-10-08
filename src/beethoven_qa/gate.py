@@ -215,7 +215,10 @@ class Verdicts(NamedTuple):
 # CrossHair's own line for each condition, ``<file>:<line>: info: <verdict>``.
 _CONFIRMED = ": info: Confirmed over all paths."
 _UNCONFIRMED = ": info: Not confirmed."
-_UNMET = ": info: Unable to meet precondition."
+# CrossHair 0.0.111 ends the third with a period when no input met the precondition and with the
+# reason in parentheses when the precondition raised ("(possibly because it raised ... ?)", its
+# core.py), so that verdict is read by its opening words, the other two by their whole line.
+_UNMET = ": info: Unable to meet precondition"
 
 
 @beartype
@@ -226,23 +229,27 @@ _UNMET = ": info: Unable to meet precondition."
 @ensure(
     lambda result, text: (
         sum(result)
-        == sum(1 for line in text.splitlines() if line.endswith((_CONFIRMED, _UNCONFIRMED, _UNMET)))
+        == sum(
+            1
+            for line in text.splitlines()
+            if _UNMET in line or line.endswith((_CONFIRMED, _UNCONFIRMED))
+        )
     ),
     "every verdict line is counted once, under one verdict, and nothing else is counted",
 )
 @ensure(
-    lambda result, text: (
-        (result.unmet > 0) == any(line.endswith(_UNMET) for line in text.splitlines())
-    ),
-    "a precondition no input can meet is never missed and never invented",
+    lambda result, text: (result.unmet > 0) == any(_UNMET in line for line in text.splitlines()),
+    "a precondition no input can meet is never missed and never invented, with or without a reason",
 )
 def verdicts(text: str) -> Verdicts:
     """The verdicts in what one CrossHair process printed, counted from its per-condition lines."""
     lines = text.splitlines()
+    unmet = sum(1 for line in lines if _UNMET in line)
+    rest = [line for line in lines if _UNMET not in line]
     return Verdicts(
-        sum(1 for line in lines if line.endswith(_CONFIRMED)),
-        sum(1 for line in lines if line.endswith(_UNCONFIRMED)),
-        sum(1 for line in lines if line.endswith(_UNMET)),
+        sum(1 for line in rest if line.endswith(_CONFIRMED)),
+        sum(1 for line in rest if line.endswith(_UNCONFIRMED)),
+        unmet,
     )
 
 
@@ -547,22 +554,35 @@ def _targets(modules: list[ModuleType], package: str) -> tuple[list[str], list[s
     return sorted(functions), sorted(classes), sorted(bare)
 
 
+def _test_trees(root: Path) -> list[Path]:
+    # Where pytest collects: the directories ``[tool.pytest.ini_options].testpaths`` names, else
+    # ``tests``, and a ``conftest.py`` at the root, which pytest reads from anywhere below it.
+    with (root / "pyproject.toml").open("rb") as fh:
+        options = tomllib.load(fh).get("tool", {}).get("pytest", {}).get("ini_options", {})
+    paths = options.get("testpaths", ["tests"])
+    trees = [root / p for p in (paths.split() if isinstance(paths, str) else paths)]
+    conftest = root / "conftest.py"
+    return trees + ([conftest] if conftest.is_file() else [])
+
+
 def _checked_files(
     root: Path, config: GateConfig, modules: list[ModuleType], only: str | None
 ) -> list[Path]:
-    # The files read for what would hide a finding: under --module that module's own; otherwise
-    # every .py file of the package and of the repository's tests directory, where a suppression
-    # or a skipped test most often sits. A pinned copy under vendor/ is in neither, and vendor-check
-    # guards it.
+    # The files read for what would hide a finding: under --module that module's own, and a stub
+    # beside it; otherwise every .py and .pyi file of the package and of the directories pytest
+    # collects, where a suppression or a skipped test most often sits. A pinned copy under
+    # vendor/ is in neither, and vendor-check guards it.
     if only is not None:
-        return [Path(f) for m in modules if (f := getattr(m, "__file__", None))]
-    trees = [(root / config.src / config.package).resolve(), root / "tests"]
-    return [
+        own = [Path(f) for m in modules if (f := getattr(m, "__file__", None))]
+        return own + [stub for path in own if (stub := path.with_suffix(".pyi")).is_file()]
+    trees = [(root / config.src / config.package).resolve(), *_test_trees(root)]
+    files = [tree for tree in trees if tree.is_file()]
+    return files + [
         path
         for tree in trees
         if tree.is_dir()
-        for path in sorted(tree.rglob("*.py"))
-        if "__pycache__" not in path.parts
+        for path in sorted(tree.rglob("*.py*"))
+        if path.suffix in {".py", ".pyi"} and "__pycache__" not in path.parts
     ]
 
 
@@ -613,30 +633,27 @@ def _imports(tree: ast.Module) -> dict[str, str]:
     return names
 
 
-def _named(node: ast.AST) -> list[ast.expr]:
-    # What a node calls or decorates with: a call's function, and a decorator written without a
-    # call (one written with a call is met as the call itself, once).
-    if isinstance(node, ast.Call):
-        return [node.func]
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return [d for d in node.decorator_list if not isinstance(d, ast.Call)]
-    return []
-
-
 def _skips(tree: ast.Module) -> list[tuple[int, str]]:
-    # Every decorator and call that skips a test or expects it to fail, by the dotted name as
-    # written and as the module's imports resolve it.
+    # Every name that skips a test or expects it to fail, wherever it is written (a decorator, a
+    # call, a mark bound to ``pytestmark`` or given to ``pytest.param`` or ``add_marker``, an
+    # exception raised, a TestCase's ``skipTest``), by the dotted name as written and as the
+    # module's imports resolve it. ast.walk meets a dotted name's outer node before its inner
+    # ones, so a name is reported once, from where it begins.
     names = _imports(tree)
-    found: list[tuple[int, str]] = []
+    found: dict[tuple[int, int], str] = {}
     for node in ast.walk(tree):
-        for expr in _named(node):
-            dotted = _dotted(expr)
-            if dotted is None:
-                continue
-            head, dot, rest = dotted.partition(".")
-            if dotted in _SKIPS or names.get(head, head) + dot + rest in _SKIPS:
-                found.append((expr.lineno, dotted))
-    return found
+        if not isinstance(node, (ast.Name, ast.Attribute)):
+            continue
+        if (node.lineno, node.col_offset) in found:
+            continue
+        dotted = _dotted(node)
+        if dotted is None:
+            continue
+        head, dot, rest = dotted.partition(".")
+        method = isinstance(node, ast.Attribute) and node.attr == _SKIP_METHOD
+        if method or dotted in _SKIPS or names.get(head, head) + dot + rest in _SKIPS:
+            found[node.lineno, node.col_offset] = dotted
+    return [(line, name) for (line, _), name in found.items()]
 
 
 def _hidden_in(path: Path) -> list[tuple[str, str]]:
@@ -644,6 +661,8 @@ def _hidden_in(path: Path) -> list[tuple[str, str]]:
     # something; the file is read once by tokenize for its comments and once by ast for the names
     # a decorator or a call reaches, because a comment is no node and a string is no comment.
     found: list[tuple[str, str]] = []
+    if path.suffix == ".pyi":
+        return [("stub", f" {_NO_STUB}")]
     for line, text in _comments(path):
         if _DIRECTIVE.match(text):
             found.append(("directive", f"{line}: {text}"))
@@ -659,7 +678,8 @@ def _hidden(paths: list[Path], root: Path) -> list[str]:
     # run, with its file and line, and once per kind the way out. A `# crosshair:` comment can
     # switch checking off or cut the search below the declared bound, and the command line cannot
     # override every one of them; a suppression comment is read by no tool the standards run, and
-    # a skipped test runs nothing, so none of them is allowed in a checked repository.
+    # a skipped test runs nothing, and mypy reads a stub in place of the module beside it, so none
+    # of them is allowed in a checked repository.
     found: list[str] = []
     for path in paths:
         rel = path.relative_to(root)
@@ -669,20 +689,24 @@ def _hidden(paths: list[Path], root: Path) -> list[str]:
             found.append(f"{rel}: cannot be read: {exc}")
     if any(line.startswith("directive ") for line in found):
         found.append(_INSTEAD_OF_A_DIRECTIVE)
-    if any(line.startswith(("suppression ", "skip ")) for line in found):
+    if any(line.startswith(("suppression ", "skip ", "stub ")) for line in found):
         found.append(_INSTEAD_OF_A_SUPPRESSION)
     return found
 
 
 _DIRECTIVE = re.compile(r"#\s*crosshair\s*:", re.IGNORECASE)
-# The comments that set a finding or a line aside for ruff (and flake8), mypy, bandit, coverage.py,
-# jscpd, zizmor or complexipy, each found wherever a hash begins it inside a comment, the way the
-# tools find them: whitespace-tolerant, whatever the case.
+# The comments that set a finding or a line aside for ruff (and flake8, and isort's markers that
+# ruff's import rule honours, and the formatter's), mypy (every inline configuration comment,
+# which loosens the file whatever it names), bandit, coverage.py, jscpd, zizmor or complexipy,
+# each found wherever a hash begins it inside a comment, the way the tools find them:
+# whitespace-tolerant, whatever the case.
 _SUPPRESSION = re.compile(
     r"#\s*(?:"
     r"(?:(?:flake8|ruff)\s*:\s*)?noqa\b"
     r"|type\s*:\s*ignore\b"
-    r"|mypy\s*:\s*ignore-errors\b"
+    r"|mypy\s*:"
+    r"|isort\s*:\s*(?:skip|off)"
+    r"|fmt\s*:\s*(?:off|skip)\b"
     r"|nosec\b"
     r"|pragma[:\s]\s*no\s*cover\b"
     r"|jscpd\s*:\s*ignore"
@@ -709,9 +733,27 @@ _SKIPS = frozenset(
         "unittest.skipIf",
         "unittest.skipUnless",
         "unittest.expectedFailure",
+        "unittest.SkipTest",
+        "unittest.case.skip",
+        "unittest.case.skipIf",
+        "unittest.case.skipUnless",
+        "unittest.case.expectedFailure",
+        "unittest.case.SkipTest",
+        "pytest.skip.Exception",
+        "_pytest.outcomes.skip",
+        "_pytest.outcomes.xfail",
+        "_pytest.outcomes.importorskip",
+        "_pytest.outcomes.Skipped",
+        "_pytest.outcomes.XFailed",
     }
 )
+# A TestCase's own way out, met as an attribute of whatever object, since ``self`` is no import.
+_SKIP_METHOD = "skipTest"
 _NO_SUPPRESSION = "no comment sets a finding aside; fix what it hides"
+_NO_STUB = (
+    "mypy reads a stub in place of the module beside it, whatever the module holds; no stub "
+    "sets a finding aside, remove it and type the module"
+)
 _NO_SKIP = "a test is never skipped or expected to fail; make it pass or remove it"
 _INSTEAD_OF_A_DIRECTIVE = (
     "instead of a directive: a function CrossHair must not or cannot run goes under "

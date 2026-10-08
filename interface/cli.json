@@ -17,7 +17,7 @@
    },
    "exit": {
     "0": "both checks passed",
-    "1": "a finding: a public function without contracts, a counterexample, a precondition no input can meet, a directive, a suppression comment or a skipped test in the package or its tests directory, an unproven entry that names no contracted function, or anything else the gate refuses (CrossHair's own exit code when CrossHair itself failed)",
+    "1": "a finding: a public function without contracts, a counterexample, a precondition no input can meet, a directive, a suppression comment, a skipped test or a .pyi stub in the package or where pytest collects, an unproven entry that names no contracted function, or anything else the gate refuses (CrossHair's own exit code when CrossHair itself failed)",
     "2": "the [tool.beethoven-qa] table cannot be used, or --module names no checked module of the package"
    }
   },
