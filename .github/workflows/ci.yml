@@ -1,8 +1,9 @@
 name: ci
 # The definition of done for beethoven-qa itself, and for the plugin it ships. No job holds a secret
-# and none reaches the grid: GitHub's runners cannot (VPN and a one-time code stand between), and
-# tokens never enter a repository (CLAUDE.md). The two job names are the required checks in
-# .github/rulesets/main.json; renaming a job means changing that file in the same pull request.
+# and none reaches a university's cluster: GitHub's runners cannot (the university's own sign-in
+# stands between, at Wayne State a VPN and a one-time code), and tokens never enter a repository
+# (CLAUDE.md). The two job names are the required checks in .github/rulesets/main.json; renaming
+# a job means changing that file in the same pull request.
 on:
   push:
     branches: [main]

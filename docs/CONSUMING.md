@@ -23,7 +23,8 @@ Anthropic's marks, used here to say what it runs.
 - **Python that may take dependencies** (beethoven-agents, the research pipeline): every step
   below. Each public function carries contracts, the gate proves them, the copy is checked on every
   push.
-- **hpcworker's framework** (Python 3.6 standard library only, for the login node's CentOS 7) and
+- **hpcworker's framework** (the standard library only, of the oldest Python on the login node of a
+  site it supports: 3.6 today, Wayne State's CentOS 7, as that site's module records) and
   **the browser and desktop editions** (TypeScript): the repository half only, the pre-push gate,
   the required check, auto-merge and rulesets as code, with their own language's checks. No copy,
   no icontract, no new dependency. The boundary lane comes with the copy, so these repositories
