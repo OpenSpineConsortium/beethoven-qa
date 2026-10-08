@@ -123,7 +123,8 @@ Beside the definition of done, which says whether code is correct, six groups sa
 can read it, change it and trust what built it: **readability** (cognitive complexity 15,
 cyclomatic 10, 4 parameters, 25 lines of code), **design** (the Chidamber and Kemerer suite with
 LCOM4), **duplication** and **coverage** (SonarSource's Sonar way conditions on new code: at most 3%
-duplicated, at least 80% covered), **security** (bandit, each finding with its CWE) and **supply
+duplicated, in jscpd's clones of 10 lines and 40 of its tokens, at least 80% covered), **security**
+(bandit, each finding with its CWE) and **supply
 chain** (OpenSSF Scorecard's checks of the workflow files). Each is a module of
 `beethoven_qa.standards`, a group of `python -m beethoven_qa standards <group>|all`, a SARIF 2.1.0
 log and a job of the kit's `standards.yml`; each passes or fails alone, and the one required check

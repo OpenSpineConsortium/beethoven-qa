@@ -238,30 +238,103 @@ def test_a_deep_hierarchy_blocks(tmp_path: Path) -> None:
 
 
 def _block(name: str) -> str:
+    # Fifteen lines of about twelve of jscpd's tokens each: a clone under any floor.
     body = "".join(f"    total = total + values[{n}] * 3 - offset // {n + 2}\n" for n in range(12))
     return f"def {name}(values, offset):\n    total = 0\n{body}    return total\n"
 
 
-def test_duplication_measures() -> None:
-    line = lambda n, k: (n, k, 10)  # noqa: E731
-    a = tuple(line(n, f"k{n % 3}") for n in range(1, 13))
-    assert duplication.repeated((a,), 3, 30) != ()
-    assert duplication.repeated((a,), 3, 31) == ()
-    assert duplication.within_limit(3, 100) and not duplication.within_limit(4, 100)
+# The function the token-window detector let through on 2026-10-08: 13 lines holding 57 of
+# jscpd's tokens (4.4 a line) against its floor of 100. The first ten lines hold 48, fewer than
+# jscpd's own default floor of 50.
+SPARSE = """\
+def NAME(items):
+    total = 0
+    for item in items:
+        if item is None:
+            continue
+        total += int(item) * 3 + 1
+        if total > 1000:
+            total -= 500
+        elif total < -1000:
+            total += 500
+        else:
+            total = total % 997
+    return total
+"""
+
+# Twelve lines of two or three tokens each, 35 in all: under the floor, so not a clone.
+COLUMN = "def NAME():\n" + "".join(f"    value_{n} = {n}\n" for n in range(10)) + "    return 0\n"
+
+COPIES = {f"{PKG}/copies.py": _block("first") + "\n\n" + _block("second")}
+SMALL = {f"{PKG}/other.py": "def small(x):\n    return x\n"}
 
 
-def test_copied_new_code_blocks_and_copies_the_base_held_do_not(tmp_path: Path) -> None:
-    root = _repo(tmp_path, {})
-    _write(root, {f"{PKG}/copies.py": _block("first") + "\n\n" + _block("second")})
-    report = _check(root, "duplication")
-    assert not report.passed and report.blocking
-    assert report.blocking[0].message.startswith("lines ")
+def _pair(text: str, tail_a: str = "", tail_b: str = "") -> dict[str, str]:
+    # ``text`` once per file, under two function names, each file with its own ending.
+    return {
+        f"{PKG}/a.py": text.replace("NAME", "first") + tail_a,
+        f"{PKG}/b.py": text.replace("NAME", "second") + tail_b,
+    }
 
+
+def _commit_all(root: Path, message: str) -> None:
     _git(root, "add", "-A")
-    _git(root, "commit", "-q", "-m", "copies")
-    _write(root, {f"{PKG}/other.py": "def small(x):\n    return x\n"})
+    _git(root, "commit", "-q", "-m", message)
+
+
+def test_duplication_measures() -> None:
+    assert duplication.within_limit(3, 100) and not duplication.within_limit(4, 100)
+    lines = frozenset(range(1, 21))
+    assert duplication.in_blocks(lines, ((5, 8), (30, 40))) == frozenset({5, 6, 7, 8})
+    assert duplication.in_blocks(lines, ()) == frozenset()
+
+
+def test_copied_new_code_blocks_and_a_clone_the_base_held_is_unchanged(tmp_path: Path) -> None:
+    root = _repo(tmp_path, {})
+    _write(root, COPIES)
     report = _check(root, "duplication")
-    assert report.passed and not report.runs[0].findings, report.summary
+    assert not report.passed and "30 of 30 new lines" in report.summary
+    assert [(f.line, f.end_line, f.value) for f in report.blocking] == [(1, 15, 15), (18, 32, 15)]
+    where = f"lines 1-15 repeat a block also found at {PKG}/copies.py:18, 15 of them new"
+    assert report.blocking[0].message == where and set(_states(report).values()) == {"new"}
+    (run,) = report.runs
+    assert run.tool == "jscpd" and run.version.count(".") == 2, run.version
+
+    _commit_all(root, "copies")
+    _write(root, SMALL)
+    report = _check(root, "duplication")
+    assert report.passed and not report.blocking, report.summary
+    assert set(_states(report).values()) == {"unchanged"}
+    assert [f.level for f in report.runs[0].findings] == ["warning", "warning"]
+
+    # The two names swapped: the two changed lines both lie in a clone the base held, which is the
+    # same clone (the same text, copied from the same file) now holding new lines.
+    _write(root, {f"{PKG}/copies.py": _block("second") + "\n\n" + _block("first")})
+    report = _check(root, "duplication")
+    assert not report.passed and "2 of 4 new lines" in report.summary  # with other.py's two
+    assert set(_states(report).values()) == {"updated"} and len(report.blocking) == 2
+
+
+def test_the_old_copy_of_a_block_newly_copied_is_recorded_and_does_not_block(
+    tmp_path: Path,
+) -> None:
+    root = _repo(tmp_path, COPIES)
+    _write(root, {f"{PKG}/third.py": _block("third")})
+    report = _check(root, "duplication")
+    assert not report.passed and "15 of 15 new lines" in report.summary
+    assert {(f.path, f.line) for f in report.blocking} == {(f"{PKG}/third.py", 1)}
+    # The old blocks' own clone is unchanged; the first of them, which jscpd pairs the new copy
+    # with (each copy is paired with the first it saw), is new to the record and an error to no one.
+    recorded = {
+        (f.path, f.line, f.level, s)
+        for f, s in zip(report.runs[0].findings, report.runs[0].states, strict=True)
+        if f.path == f"{PKG}/copies.py"
+    }
+    assert recorded == {
+        (f"{PKG}/copies.py", 1, "warning", "unchanged"),
+        (f"{PKG}/copies.py", 18, "warning", "unchanged"),
+        (f"{PKG}/copies.py", 1, "warning", "new"),
+    }
 
 
 def test_a_block_with_its_names_changed_is_not_a_copy(tmp_path: Path) -> None:
@@ -269,6 +342,102 @@ def test_a_block_with_its_names_changed_is_not_a_copy(tmp_path: Path) -> None:
     other = _block("second").replace("total", "acc")
     _write(root, {f"{PKG}/copies.py": _block("first") + "\n\n" + other})
     assert _check(root, "duplication").passed
+
+
+def test_the_floor_finds_ten_sparse_lines_and_not_a_column(tmp_path: Path) -> None:
+    root = _repo(tmp_path, {})
+    _write(root, _pair(SPARSE))
+    report = _check(root, "duplication")
+    assert not report.passed
+    assert {(f.path, f.line, f.end_line) for f in report.blocking} == {
+        (f"{PKG}/a.py", 1, 13),
+        (f"{PKG}/b.py", 1, 13),
+    }
+
+    # Its first ten lines, each copy ending in its own way (jscpd may count the line where the
+    # copies part as the block's last).
+    ten = "\n".join(SPARSE.splitlines()[:10]) + "\n"
+    _write(root, _pair(ten, "    return total\n", "    raise ValueError(total)\n"))
+    report = _check(root, "duplication")
+    assert not report.passed and len(report.blocking) == 2
+    assert all(f.line == 1 and f.end_line in (10, 11) for f in report.blocking)
+
+    # Under the floor: too few tokens in twelve lines, then too few lines however dense.
+    _write(root, _pair(COLUMN))
+    report = _check(root, "duplication")
+    assert report.passed and not report.runs[0].findings, report.summary
+    nine = "\n".join(_block("NAME").splitlines()[:9]) + "\n"
+    _write(root, _pair(nine, "    return 1\n", "    raise ValueError(total)\n"))
+    report = _check(root, "duplication")
+    assert report.passed and not report.runs[0].findings, report.summary
+
+
+def test_imports_and_docstrings_are_compared_with_nothing_and_counted_as_nothing(
+    tmp_path: Path,
+) -> None:
+    # Twenty-two import lines (47 tokens) and a thirteen-line docstring: a clone each, were they
+    # compared; and the only lines of code are the two assignments.
+    imports = "from pkg.other import (\n" + "".join(f"    name_{n},\n" for n in range(20)) + ")\n"
+    prose = "".join(f"Line {n} of the docstring, with a few words on it.\n" for n in range(11))
+    doc = f'"""A module.\n{prose}"""\n'
+    root = _repo(tmp_path, {})
+    _write(root, {f"{PKG}/a.py": doc + imports + "\nA = 1\n"})
+    _write(root, {f"{PKG}/b.py": doc + imports + "\nB = 2\n"})
+    report = _check(root, "duplication")
+    assert report.passed and not report.runs[0].findings, report.summary
+    assert "0 of 2 new lines" in report.summary
+
+
+def test_the_ignore_marker_is_refused_and_hides_nothing(tmp_path: Path) -> None:
+    start, end = f"# {duplication.MARKER}-start\n", f"# {duplication.MARKER}-end\n"
+    marked = {f"{PKG}/marked.py": start + _block("first") + end + "\n\n" + _block("second")}
+    root = _repo(tmp_path, {})
+    _write(root, marked)
+    report = _check(root, "duplication")
+    assert not report.passed and "2 comments hold" in report.summary
+    assert {(f.rule, f.line) for f in report.blocking} == {
+        (duplication.IGNORE.id, 1),
+        (duplication.IGNORE.id, 17),
+        (duplication.RULE.id, 2),
+        (duplication.RULE.id, 20),
+    }
+    assert _states(report)[(duplication.IGNORE.id, start.strip())] == "new"
+
+    # A string holding the text is not a comment: defused for jscpd, which would otherwise read it
+    # there too, and not refused.
+    strung = f'TEXT = "{duplication.MARKER}-start"\n' + _block("first") + "\n\n" + _block("second")
+    _write(root, {f"{PKG}/marked.py": strung})
+    report = _check(root, "duplication")
+    rules = {(f.rule, f.line) for f in report.blocking}
+    assert rules == {(duplication.RULE.id, 2), (duplication.RULE.id, 19)}
+
+    # A marker the base held is unchanged and does not block, and the clone behind it is seen.
+    _write(root, marked)
+    _commit_all(root, "marked")
+    _write(root, SMALL)
+    report = _check(root, "duplication")
+    assert report.passed and set(_states(report).values()) == {"unchanged"}
+    assert len(report.runs[0].findings) == 4
+
+
+def test_a_jscpd_configuration_file_changes_nothing(tmp_path: Path) -> None:
+    # Were it read, the file would ignore the copies, set the floors out of reach and allow 100%.
+    config = json.dumps(
+        {
+            "threshold": 100,
+            "ignore": ["**/copies.py"],
+            "minTokens": 100000,
+            "min_tokens": 100000,
+            "minLines": 1000,
+            "min_lines": 1000,
+            "mode": "strict",
+        }
+    )
+    planted = {".jscpd.json": config, "src/.jscpd.json": config, f"{PKG}/.jscpd.json": config}
+    root = _repo(tmp_path, planted)
+    _write(root, COPIES)
+    report = _check(root, "duplication")
+    assert not report.passed and [f.line for f in report.blocking] == [1, 18]
 
 
 # --- coverage -----------------------------------------------------------------------------------
