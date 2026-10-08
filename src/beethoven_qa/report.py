@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shlex
 import subprocess
 import sys
@@ -150,8 +151,10 @@ NOT_SHOWN: tuple[str, ...] = (
     "older code are recorded as unchanged and pass.",
     "A green test lane says every test passed; what each test means, and whether it is the "
     "right test, is a person's judgement, and so is what each contract promises.",
-    "The gate runs on the machine that pushes and again on GitHub's runner; this report is as "
-    "true as the machine that made it, and no truer. Its lanes ran in that machine's environment.",
+    "The pre-push hook runs every lane on the machine that pushes; GitHub's runner runs the jobs "
+    "the Enforcement section lists, and a lane no job runs is checked by the hook alone. This "
+    "report is as true as the machine that made it, and no truer: its lanes ran in that "
+    "machine's environment.",
 )
 
 _GATE = "gate: "
@@ -251,6 +254,7 @@ class Enforcement(NamedTuple):
     required: tuple[str, ...]  # the required status checks of .github/rulesets/main.json
     strict: bool | None  # its strict flag; None when the file or the rule is missing
     workflows: tuple[tuple[str, tuple[str, ...]], ...]  # (file, its jobs' names)
+    bypass: tuple[str, ...]  # who the rule lets past its checks, "<actor> (<mode>)" each
 
 
 class Evidence(NamedTuple):
@@ -260,6 +264,7 @@ class Evidence(NamedTuple):
     version: str  # beethoven-qa's
     repository: Repository
     tools: tuple[Tool, ...]
+    lock: str  # what pixi.lock was read as: its records for this machine's platform, or why not
     lanes: tuple[Lane, ...]
     gate: GateSummary
     standards: tuple[GroupSummary, ...]
@@ -575,20 +580,45 @@ def _tool(versions: dict[str, str], name: str) -> str:
     return f"{name} {versions.get(name, NOT_IN_LOCK)}"
 
 
-def _before_groups(v: dict[str, str]) -> tuple[tuple[str, str], ...]:
-    proven = "contracted and proven by the gate"
+# Home-made code is contracted and the gate searches its contracts; how far each was confirmed
+# is in the gate section, and "proven" would claim what only a condition confirmed over all paths
+# is.
+_UNDER = "contracted and under the gate, whose table says how far each contract was confirmed"
+# The lane rows read from what ran, not from what the code believes ran: a consumer's lint task
+# may run anything.
+_LANE_ROWS = (
+    ("lint", ""),
+    ("typecheck", ""),
+    ("test", "; what each test asserts is a person's judgement"),
+)
+
+
+def _program(versions: dict[str, str], head: str) -> str:
+    name = head.rsplit("/", 1)[-1]
+    if name in PINNED:
+        return f"a tool, {_tool(versions, name)}"
+    return f"the program `{name}`, not one of the tools this report knows"
+
+
+def _lane_rows(lanes: tuple[Lane, ...], versions: dict[str, str]) -> tuple[tuple[str, str], ...]:
+    rows = []
+    for task, note in _LANE_ROWS:
+        heads: list[str] = []
+        for lane in lanes:
+            if lane.task == task and lane.argv and lane.argv[0] not in heads:
+                heads.append(lane.argv[0])
+        who = "; ".join(_program(versions, head) for head in heads) or "no command ran"
+        rows.append((task, who + note))
+    return tuple(rows)
+
+
+def _fixed_rows(v: dict[str, str]) -> tuple[tuple[str, str], ...]:
     return (
-        ("lint", f"a tool, {_tool(v, 'ruff')}"),
-        ("typecheck", f"a tool, {_tool(v, 'mypy')}"),
-        (
-            "test",
-            f"a tool, {_tool(v, 'pytest')}, runs the tests under {_tool(v, 'typeguard')}; what "
-            "each test asserts is a person's judgement",
-        ),
-        ("boundary", f"home-made code, `beethoven_qa.boundary`, {proven}"),
+        ("boundary", f"home-made code, `beethoven_qa.boundary`, {_UNDER}"),
         (
             "symbolic, check 1: every public function carries contracts",
-            f"home-made code, `beethoven_qa.gate`, {proven}",
+            f"home-made code, `beethoven_qa.gate`, {_UNDER}; what reads the files is private "
+            "code the tests hold",
         ),
         (
             "symbolic, check 2: no counterexample within the bound",
@@ -599,24 +629,28 @@ def _before_groups(v: dict[str, str]) -> tuple[tuple[str, str], ...]:
 
 def _group_row(group: GroupSummary) -> tuple[str, str]:
     # Its SARIF log names each run's tool: beethoven-qa for the home-made reader, the tool's own
-    # name otherwise, so the row says what the log says and nothing the code believes about it.
-    who = [
-        f"home-made code, beethoven-qa {v}, contracted and proven by the gate"
-        if n == "beethoven-qa"
-        else f"a tool, {n} {v}"
+    # name otherwise, so the row says what the log says about who found the findings. The verdict
+    # over them (the limit, which findings are new against the base) is home-made in every group.
+    finders = [
+        f"home-made code, beethoven-qa {v}" if n == "beethoven-qa" else f"a tool, {n} {v}"
         for n, v in group.tools
     ]
-    return f"standards: {group.group}", "; ".join(who) or "no tool recorded in its log"
+    found = "; ".join(finders) or "no tool recorded in its log"
+    verdict = f"home-made code, beethoven-qa {__version__} (the limit, the base matching), {_UNDER}"
+    return f"standards: {group.group}", f"the findings: {found}; the verdict over them: {verdict}"
 
 
-def _after_groups(vendor: bool) -> tuple[tuple[str, str], ...]:
-    copy = (VENDOR_LANE, "home-made code, `beethoven_qa.vendor`, contracted and proven by the gate")
+def _merge_row(bypass: tuple[str, ...]) -> tuple[str, str]:
+    rule = "GitHub's required checks, the rule as code in `.github/rulesets/main.json`; "
+    who = "no person" if not bypass else "a person only through the bypass the rule grants: "
+    return "whether a change merges", rule + who + ", ".join(bypass)
+
+
+def _after_groups(vendor: bool, bypass: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    copy = (VENDOR_LANE, f"home-made code, `beethoven_qa.vendor`, {_UNDER}")
     return (
         *((copy,) if vendor else ()),
-        (
-            "whether a change merges",
-            "GitHub's required checks, the rule as code in `.github/rulesets/main.json`; no person",
-        ),
+        _merge_row(bypass),
         (
             "every limit, and what a contract or a test means",
             "a person, in a reviewed release of beethoven-qa",
@@ -632,18 +666,36 @@ def _after_groups(vendor: bool) -> tuple[tuple[str, str], ...]:
     "every group that ran has its row",
 )
 @ensure(
-    lambda result, vendor: any(c == VENDOR_LANE for c, _ in result) == vendor,
+    lambda result, lanes: (
+        any(c == VENDOR_LANE for c, _ in result) == any(lane.task == VENDOR_LANE for lane in lanes)
+    ),
     "the copy's check has a row exactly when it ran",
+)
+@ensure(
+    lambda result, enforcement: (
+        any(c == "whether a change merges" and w.endswith("; no person") for c, w in result)
+        == (not enforcement.bypass)
+    ),
+    "no person decides a merge exactly when the rule names no bypass",
 )
 @ensure(lambda result: all(c and w for c, w in result), "no empty cell")
 @ensure(lambda result, groups: len(result) >= len(groups) + 8, "the fixed rows are always there")
 def deciders(
-    tools: tuple[Tool, ...], groups: tuple[GroupSummary, ...], vendor: bool
+    tools: tuple[Tool, ...],
+    lanes: tuple[Lane, ...],
+    groups: tuple[GroupSummary, ...],
+    enforcement: Enforcement,
 ) -> tuple[tuple[str, str], ...]:
     """The table "who decides each verdict": for each check, a tool at its locked version,
-    home-made code the gate proved, or a person."""
+    home-made code under the gate, GitHub's rule, or a person."""
     versions = {t.name: t.locked for t in tools}
-    return (*_before_groups(versions), *map(_group_row, groups), *_after_groups(vendor))
+    vendor = any(lane.task == VENDOR_LANE for lane in lanes)
+    return (
+        *_lane_rows(lanes, versions),
+        *_fixed_rows(versions),
+        *map(_group_row, groups),
+        *_after_groups(vendor, enforcement.bypass),
+    )
 
 
 def _md_head(e: Evidence) -> list[str]:
@@ -657,7 +709,8 @@ def _md_head(e: Evidence) -> list[str]:
         f"Made {e.made} by beethoven-qa {e.version} (`python -m beethoven_qa report`). {verdict}",
         "",
         'Beethoven runs Claude Code and is not an Anthropic product; "Claude" and "Claude '
-        "Code\" are Anthropic's marks, used here to say what it runs.",
+        'Code" are Anthropic\'s marks, used here to say what it runs; "Open OnDemand" is the '
+        "mark of its publisher.",
     ]
 
 
@@ -673,7 +726,7 @@ def _md_repository(e: Evidence) -> list[str]:
 
 def _md_lanes(e: Evidence) -> list[str]:
     rows = tuple(
-        (lane.task, " ".join(lane.argv), str(lane.exit), f"{lane.seconds:.1f}", lane.output)
+        (lane.task, shlex.join(lane.argv), str(lane.exit), f"{lane.seconds:.1f}", lane.output)
         for lane in e.lanes
     )
     return [
@@ -687,7 +740,7 @@ def _md_lanes(e: Evidence) -> list[str]:
 def _md_environment(e: Evidence) -> list[str]:
     rows = tuple((t.name, t.locked, t.reported or "says nothing of itself") for t in e.tools)
     return [
-        "What `pixi.lock` pins, and what each tool answers to `--version`.",
+        f"What `pixi.lock` pins, and what each tool answers to `--version`. {e.lock}.",
         "",
         table(("package", "pinned in pixi.lock", "reports itself as"), rows),
     ]
@@ -700,7 +753,8 @@ def _md_gate_totals(t: Totals | None) -> list[str]:
         f"Of {t.conditions} conditions, **{t.confirmed} were confirmed over all paths** (a "
         f"proof), {t.not_confirmed} were not confirmed within {t.bound} s each (a bounded search "
         f"that found no counterexample, not a proof), and {t.unable} could be given no input "
-        "that meets the precondition (a vacuous contract, which fails the gate).",
+        "that meets the precondition (a vacuous contract, or one stated over values CrossHair "
+        "cannot build; either fails the gate).",
     ]
 
 
@@ -753,6 +807,7 @@ def _md_enforcement(e: Evidence) -> list[str]:
         f"- `.githooks/pre-push`: {hook}; hands over to `{f.hook_command or 'nothing it says'}`",
         f"- required checks of `.github/rulesets/main.json`: "
         f"{', '.join(f'`{c}`' for c in f.required) or 'none'} (strict: {strict})",
+        f"- who the rule lets past its checks: {', '.join(f.bypass) or 'no one it names'}",
         "- workflows and their jobs:",
         *(jobs or ["  - none"]),
     ]
@@ -803,9 +858,23 @@ class _CannotRun(Exception):
     pass
 
 
+def _task_command(name: str, value: object) -> str | None:
+    # A task's command: a string, or a table's cmd (a string, or an argv list, which is one
+    # command); a table that only depends on others (gate) names nothing to run. A table with its
+    # own env or cwd is refused: the report runs every lane from the root in its own environment,
+    # and a lane run under other conditions than pixi gives it would be misreported.
+    if not isinstance(value, dict):
+        return value if isinstance(value, str) else None
+    for key in ("env", "cwd"):
+        if key in value:
+            raise _CannotRun(f"the task {name} sets {key}, which the report does not apply")
+    command = value.get("cmd")
+    if isinstance(command, list) and all(isinstance(a, str) for a in command):
+        return shlex.join(command)
+    return command if isinstance(command, str) else None
+
+
 def _tasks(root: Path) -> dict[str, str]:
-    # pixi.toml's [tasks], the string ones and a table's own cmd; a task that only depends on
-    # others (gate) names nothing to run.
     path = root / "pixi.toml"
     if not path.is_file():
         raise _CannotRun(f"{path} is missing")
@@ -816,8 +885,8 @@ def _tasks(root: Path) -> dict[str, str]:
         raise _CannotRun(f"{path} has no [tasks] table")
     found: dict[str, str] = {}
     for name, value in tasks.items():
-        command = value.get("cmd") if isinstance(value, dict) else value
-        if isinstance(command, str):
+        command = _task_command(str(name), value)
+        if command is not None:
             found[name] = command
     return found
 
@@ -841,10 +910,20 @@ class _Done(NamedTuple):
     text: str
 
 
-def _execute(root: Path, argv: list[str]) -> _Done:
+class _Options(NamedTuple):
+    base: str | None  # the standards lane's --base, when the command was given one
+    limit: int  # seconds a lane may run before it is stopped and recorded as exit 124
+
+
+STOPPED = 124  # the exit recorded for a lane stopped at the limit (timeout(1)'s own code)
+
+
+def _execute(root: Path, argv: list[str], limit: int) -> _Done:
     # The lane as its own process from the repository's root, in the environment the report was
     # started in, its output (both streams, as they came) kept whole for the file the report
-    # names. A command that cannot start is a failed lane, never a crashed report.
+    # names. A command that cannot start is a failed lane, never a crashed report; one that runs
+    # past the limit is stopped (its own process; what it started may live on) and failed, so a
+    # hung lane still leaves a report that names it.
     started = time.monotonic()
     try:
         done = subprocess.run(
@@ -855,9 +934,15 @@ def _execute(root: Path, argv: list[str]) -> _Done:
             text=True,
             errors="replace",
             check=False,
+            timeout=limit,
         )
     except OSError as exc:
         return _Done(127, time.monotonic() - started, f"could not start: {exc}\n")
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else ""
+        partial = exc.stdout if isinstance(exc.stdout, str) else partial
+        stopped = f"\nreport: the lane was stopped after {limit} s and counts as failed\n"
+        return _Done(STOPPED, time.monotonic() - started, partial + stopped)
     return _Done(done.returncode, time.monotonic() - started, done.stdout)
 
 
@@ -869,7 +954,7 @@ class _Ran(NamedTuple):
         return tuple(self.outputs.get(task, "").splitlines())
 
 
-def _lanes(root: Path, out: Path, tasks: list[tuple[str, str]]) -> _Ran:
+def _lanes(root: Path, out: Path, tasks: list[tuple[str, str]], options: _Options) -> _Ran:
     lanes: list[Lane] = []
     outputs: dict[str, str] = {}
     for task, command in tasks:
@@ -877,7 +962,8 @@ def _lanes(root: Path, out: Path, tasks: list[tuple[str, str]]) -> _Ran:
             argv = shlex.split(piece)
             if task == "standards":
                 argv += ["--sarif", str(out / "sarif")]
-            done = _execute(root, argv)
+                argv += ["--base", options.base] if options.base is not None else []
+            done = _execute(root, argv, options.limit)
             rel = f"lanes/{task}-{index}.txt"
             (out / rel).write_text(done.text, encoding="utf-8")
             outputs[task] = outputs.get(task, "") + done.text
@@ -901,31 +987,91 @@ class _Package(BaseModel):
     # One record of the lock's packages list: a conda one names its file in its URL, a PyPI one
     # carries its name and version.
     conda: str | None = None
+    pypi: str | None = None
     name: str | None = None
     version: str | None = None
 
 
+class _Platform(BaseModel):
+    # A named platform of the lock (pixi 0.81's `platforms:` list), with the subdir it stands for.
+    name: str
+    subdir: str
+
+
+class _Environment(BaseModel):
+    # An environment's packages by platform: each a list of {conda: url} or {pypi: url}.
+    packages: dict[str, list[dict[str, str]]] = {}
+
+
 class _Lock(BaseModel):
     packages: list[_Package] = []
+    platforms: list[_Platform] = []
+    environments: dict[str, _Environment] = {}
 
 
-def _lock_entries(root: Path) -> tuple[tuple[str, str], ...]:
+def _subdir() -> str:
+    # conda's name for this machine (linux-64, osx-arm64, win-64), the key the lock's environment
+    # lists its packages under, or the subdir a named platform of the lock maps to.
+    machine = platform.machine().lower()
+    arch = {"x86_64": "64", "amd64": "64"}.get(machine, machine)
+    system = {"linux": "linux", "darwin": "osx", "win32": "win"}.get(sys.platform, sys.platform)
+    return f"{system}-{arch}"
+
+
+def _lock_urls(lock: _Lock, subdir: str) -> set[str]:
+    # The URLs the default environment lists for this machine's platform; empty when the lock
+    # names none for it.
+    names = [p.name for p in lock.platforms if p.subdir == subdir] + [subdir]
+    environment = lock.environments.get("default")
+    if environment is None:
+        return set()
+    return {
+        url
+        for name in names
+        for record in environment.packages.get(name, [])
+        for url in record.values()
+    }
+
+
+def _lock_records(lock: _Lock, subdir: str) -> tuple[str, list[_Package]]:
+    # The lock's records for this machine's platform, and the sentence that says which were read:
+    # the packages list holds every platform's records, and another platform's version of a tool
+    # is not the one that ran here.
+    urls = _lock_urls(lock, subdir)
+    if not urls:
+        return (
+            f"`pixi.lock` read: {len(lock.packages)} records; it names no environment for "
+            f"{subdir}, this machine's platform, so every record was read",
+            list(lock.packages),
+        )
+    records = [p for p in lock.packages if p.conda in urls or p.pypi in urls]
+    return (
+        f"`pixi.lock` read: {len(records)} of its {len(lock.packages)} records are the "
+        f"environment `default` for {subdir}, this machine's platform",
+        records,
+    )
+
+
+def _lock_entries(root: Path) -> tuple[str, tuple[tuple[str, str], ...]]:
+    # What the lock was read as, and each (name, version) it pins for this platform.
     path = root / "pixi.lock"
     if not path.is_file():
-        return ()
+        return "`pixi.lock` is missing, so no pinned version is known", ()
     try:
         lock = _Lock.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
-    except (yaml.YAMLError, ValidationError):
-        return ()
+    except (yaml.YAMLError, ValidationError) as exc:
+        why = type(exc).__name__
+        return f"`pixi.lock` could not be read as a lock ({why}), so no pinned version is known", ()
+    note, records = _lock_records(lock, _subdir())
     found: list[tuple[str, str]] = []
-    for package in lock.packages:
+    for package in records:
         if package.conda is not None:
             pair = conda_name_version(package.conda.rpartition("/")[2])
             if pair is not None:
                 found.append(pair)
         elif package.name is not None and package.version is not None:
             found.append((package.name, package.version))
-    return tuple(found)
+    return note, tuple(found)
 
 
 def _reported(name: str) -> str:
@@ -942,9 +1088,10 @@ def _reported(name: str) -> str:
     return first[0].strip() if first else "answered nothing"
 
 
-def _tools(root: Path) -> tuple[Tool, ...]:
-    return tuple(
-        Tool(name, locked, _reported(name)) for name, locked in pinned(_lock_entries(root), PINNED)
+def _tools(root: Path) -> tuple[str, tuple[Tool, ...]]:
+    note, entries = _lock_entries(root)
+    return note, tuple(
+        Tool(name, locked, _reported(name)) for name, locked in pinned(entries, PINNED)
     )
 
 
@@ -962,24 +1109,40 @@ class _Rule(BaseModel):
     parameters: _Parameters | None = None
 
 
+class _Bypass(BaseModel):
+    actor_type: str
+    bypass_mode: str = "always"
+
+
 class _Ruleset(BaseModel):
     rules: list[_Rule] = []
+    bypass_actors: list[_Bypass] = []
 
 
-def _ruleset(path: Path) -> tuple[tuple[str, ...], bool | None]:
-    # The required checks of the branch rule and its strict flag; nothing when the file is
-    # missing or not a ruleset, since a reader must see that there is no rule.
+class _RuleFacts(NamedTuple):
+    required: tuple[str, ...]
+    strict: bool | None
+    bypass: tuple[str, ...]
+
+
+def _ruleset(path: Path) -> _RuleFacts:
+    # The required checks of the branch rule, its strict flag and who the rule lets past them
+    # (GitHub's bypass actors, each with its mode); nothing when the file is missing or not a
+    # ruleset, since a reader must see that there is no rule.
     if not path.is_file():
-        return (), None
+        return _RuleFacts((), None, ())
     try:
         ruleset = _Ruleset.model_validate_json(path.read_text(encoding="utf-8"))
     except ValidationError:
-        return (), None
+        return _RuleFacts((), None, ())
+    bypass = tuple(f"{b.actor_type} ({b.bypass_mode})" for b in ruleset.bypass_actors)
     for rule in ruleset.rules:
         if rule.type == "required_status_checks" and rule.parameters is not None:
             contexts = tuple(c.context for c in rule.parameters.required_status_checks)
-            return contexts, rule.parameters.strict_required_status_checks_policy
-    return (), None
+            return _RuleFacts(
+                contexts, rule.parameters.strict_required_status_checks_policy, bypass
+            )
+    return _RuleFacts((), None, bypass)
 
 
 def _jobs(path: Path) -> tuple[str, ...]:
@@ -1012,15 +1175,16 @@ def _enforcement(root: Path) -> Enforcement:
     hook = root / ".githooks" / "pre-push"
     present = hook.is_file()
     command = hook_command(hook.read_text(encoding="utf-8", errors="replace")) if present else None
-    required, strict = _ruleset(root / ".github" / "rulesets" / "main.json")
+    facts = _ruleset(root / ".github" / "rulesets" / "main.json")
     return Enforcement(
         hooks_path,
         present,
         present and os.access(hook, os.X_OK),
         command or "",
-        required,
-        strict,
+        facts.required,
+        facts.strict,
         _workflows(root),
+        facts.bypass,
     )
 
 
@@ -1093,30 +1257,42 @@ def _write(out: Path, evidence: Evidence) -> None:
 
 
 def _evidence(root: Path, out: Path, repository: Repository, ran: _Ran) -> Evidence:
-    tools = _tools(root)
+    lock, tools = _tools(root)
     groups = _groups(out / "sarif", dict(group_verdicts(ran.lines("standards"))))
-    vendor = any(lane.task == VENDOR_LANE for lane in ran.lanes)
+    enforcement = _enforcement(root)
     return Evidence(
         _now(),
         __version__,
         repository,
         tools,
+        lock,
         ran.lanes,
         gate_summary(ran.lines("symbolic")),
         groups,
-        _enforcement(root),
-        deciders(tools, groups, vendor),
+        enforcement,
+        deciders(tools, ran.lanes, groups, enforcement),
         exit_code(tuple(lane.exit for lane in ran.lanes)) == 0,
     )
 
 
-def _run(root: Path, out: Path) -> int:
+def _facts(root: Path, out: Path) -> tuple[list[tuple[str, str]], Repository]:
+    # What the run needs before it writes anything: the lanes, the repository, and an out folder
+    # that is empty or not there yet. A folder holding an earlier report is refused rather than
+    # written over, since its lane files and SARIF logs would be read as this run's; nothing of
+    # ours deletes, so the person moves the old report away.
+    tasks = _lane_tasks(root)
+    repository = _repository(root)
+    if out.is_dir() and any(out.iterdir()):
+        raise _CannotRun(f"{out} is not empty; the report writes into an empty or new folder")
+    return tasks, repository
+
+
+def _run(root: Path, out: Path, options: _Options) -> int:
     # The repository's facts are read before anything is written, so the report directory, which
     # may sit inside the checkout, never makes the tree look changed by the report itself.
     root, out = root.resolve(), out.resolve()
     try:
-        tasks = _lane_tasks(root)
-        repository = _repository(root)
+        tasks, repository = _facts(root, out)
     except _CannotRun as exc:
         print(f"report: cannot run: {exc}")
         return 2
@@ -1124,7 +1300,7 @@ def _run(root: Path, out: Path) -> int:
         print(f"report: cannot run: git failed: {exc}")
         return 2
     (out / "lanes").mkdir(parents=True, exist_ok=True)
-    ran = _lanes(root, out, tasks)
+    ran = _lanes(root, out, tasks, options)
     _write(out, _evidence(root, out, repository, ran))
     failed = sorted({lane.task for lane in ran.lanes if lane.exit != 0})
     verdict = "every lane passed" if not failed else f"failed: {', '.join(failed)}"

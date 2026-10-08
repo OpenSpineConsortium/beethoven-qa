@@ -118,9 +118,11 @@ No module is done, and the gate will not let it enter a run or reach `main`, unt
    auto-merge and the required checks alone decide. The rule is strict
    (`strict_required_status_checks_policy: true`): a pull request whose branch fell behind `main`
    waits until it carries `main`, because the checks ran on a tree `main` would never hold
-   (measured 2026-10-08: with the flag off, `main`'s tree after a merge was never what the checks
-   had run on). Bringing a branch up to date is the session's own step, merge `main` in, gate,
-   push; a push a bot makes with `GITHUB_TOKEN` starts no workflow, so no automation does it.
+   (measured 2026-10-08 over the parallel streams' merges: with the flag off, `main`'s tree after
+   each was not what the checks had run on). Bringing a branch up to date is the session's own
+   step, merge `main` in, gate, push; a push a bot makes with `GITHUB_TOKEN` starts no workflow,
+   so no automation does it, and a pull request nobody drives (its session gone) waits there
+   until a person clicks Update branch or merges `main` into it.
 
 ## The code standards (greg, 2026-10-04 23:26Z; `docs/STANDARDS.md`)
 
@@ -190,7 +192,7 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   `tests/`, and a root `conftest.py`), each with its file and line: every comment a standards'
   tool would read as a suppression (`# noqa`, `# type: ignore`, `# nosec`, `# pragma: no cover`,
   `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`, the file-level `# ruff: noqa` and
-  `# flake8: noqa`, every `# mypy:` configuration comment, isort's `skip`, `skip_file` and `off`,
+  `# flake8: noqa`, every `# mypy:` configuration comment, isort's `skip`, `skip_file` and `off` (in ruff's own spelling too),
   the formatter's `# fmt: off` and `# fmt: skip`, and lizard's `#lizard forgive` and `GENERATED
   CODE`), every test skipped or expected to fail (pytest's and unittest's marks, calls and
   exceptions wherever the name is written, a decorator, `pytestmark`, `pytest.param`,
@@ -373,7 +375,7 @@ that states the function's real domain, which no caller ever leaves, is not dodg
 - The code standards (2026-10-05): what was measured while building them, the tools' behaviour
   without the flags that disable a repository's suppressions among it, is under "Measured" in
   `docs/STANDARDS.md`. The symbolic gate went from 10 targets in about 2 minutes to 32 in about 7
-  on 4 cores, and to 41 by 2026-10-08 (below).
+  on 4 cores, to 41 by 2026-10-08 and to 55 with 5.0.0 (below).
 
 - Every verdict, every run (2026-10-08, this cloud session, 4 cores; CrossHair 0.0.111). Until this
   change the plain gate, the one the pre-push hook and CI run, started CrossHair without
@@ -388,10 +390,13 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   `Grade` it enumerates the members, both conditions are confirmed over all paths in about a
   second, and a body that ignored the confidence gave the counterexample `(Grade.HIGH, Grade.LOW)`.
   The vacuity line now says both possibilities. Every run prints every verdict and counts them:
-  the package-wide gate (`pixi run --locked symbolic`, 41 targets) reported `gate: conditions:
-  11 of 121 confirmed over all paths, 110 not confirmed within 20 s per condition, 0 unable to
-  meet a precondition` in 11 min 57 s wall time on 4 cores shared with two other sessions' test
-  runs; the module gate on `beethoven_qa.gate` (6 targets, `verdicts` among them) 1 of 21
+  the package-wide gate (`pixi run --locked symbolic`) reported, on the stream's tree of 41
+  targets, `gate: conditions: 11 of 121 confirmed over all paths, 110 not confirmed within 20 s
+  per condition, 0 unable to meet a precondition` in 11 min 57 s wall time on 4 cores shared with
+  two other sessions' test runs, and on 5.0.0's merged tree of 55 targets `13 of 164 confirmed
+  over all paths, 151 not confirmed within 20 s per condition, 0 unable to meet a precondition`
+  in 13 min 54 s (the evidence report's own symbolic lane, made at 4195453); the module gate on
+  `beethoven_qa.gate` (6 targets, `verdicts` among them) 1 of 21
   confirmed over all paths (`is_public`), 20 not confirmed at the bound, every one of them over
   strings or tuples, no counterexample, in 2 min 6 s. The suppression check, run on
   this repository first, found the five comments it carried, all in tests (four `type: ignore`

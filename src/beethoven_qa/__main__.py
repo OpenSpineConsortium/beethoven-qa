@@ -96,7 +96,22 @@ def _report_parser(r: argparse.ArgumentParser) -> None:
         type=Path,
         default=Path("report"),
         help="where report.md, report.json, every lane's output and the SARIF logs are written "
-        "(default: ./report)",
+        "(default: ./report); refused unless empty or not there yet",
+    )
+    r.add_argument(
+        "--base",
+        metavar="REF",
+        default=None,
+        help="the commit the new code starts from, handed to the standards lane as its --base "
+        "(default: the lane's own, auto: the merge base with origin/main)",
+    )
+    r.add_argument(
+        "--timeout",
+        type=int,
+        default=3600,
+        metavar="SECONDS",
+        help="how long one lane may run before it is stopped and recorded as exit 124 "
+        "(default: 3600)",
     )
 
 
@@ -183,7 +198,7 @@ def main(argv: list[str]) -> int:
     if args.command == "coach":
         return _coach(args)
     if args.command == "report":
-        return report._run(args.root, args.out)
+        return report._run(args.root, args.out, report._Options(args.base, args.timeout))
     try:
         return _GIT_COMMANDS[args.command](args)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:

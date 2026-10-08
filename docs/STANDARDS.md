@@ -218,7 +218,9 @@ bandit 1.9.4, coverage.py 7.16.2, ruff 0.16.10, CrossHair 0.0.111, git 2.43.
   targets and every condition's verdict printed and counted on every run (until then only
   `--report-all` showed them, and 107 of 117 conditions were at the bound): `gate: conditions: 11
   of 121 confirmed over all paths, 110 not confirmed within 20 s per condition, 0 unable to meet a
-  precondition`, in 11 min 57 s wall time on 4 cores shared with two other sessions' test runs;
+  precondition`, in 11 min 57 s wall time on 4 cores shared with two other sessions' test runs,
+  and on 5.0.0's merged tree of 55 targets `13 of 164 confirmed over all paths, 151 not confirmed
+  within 20 s per condition, 0 unable to meet a precondition` in 13 min 54 s;
   `security.level_for`, the one target whose precondition no input could meet, proves over all
   paths now that its grades are an enum (CLAUDE.md, "Measured").
 - Two functions were broken on purpose before their contracts were trusted. `classify` marking an
@@ -305,9 +307,13 @@ On 2026-10-08, with jscpd 5.4.0 (the same session size):
   over several lines alike, the line the syntax tree gives, so each of its rows is matched by file
   and start line and anchored by the tree's qualified name (lizard's own name has no class and
   reads `outer.inner` for a nested function); the anchors did not change, and old findings still
-  match. Its NLOC counts the `def` line, each further line of the signature and every line of a
-  multi-line string or a bracketed expression, and leaves out the docstring, comments, blank lines
-  and the body of a nested function, whose `def` line it counts in the function around it. Over
+  match. Its NLOC counts the `def` line, each further line of the signature, every line of a
+  bracketed expression and the lines of a multi-line string where it counts them (one assigned
+  or passed as an argument; one after `yield` or `==`, as a dict's value, and the pieces of an
+  f-string, it takes for a comment and leaves out or subtracts, measured the same day: a
+  nine-line function holding a five-line f-string measured 3), and leaves out a docstring in
+  triple quotes (one in single quotes counts), comments, blank lines and the body of a nested
+  function, whose `def` line it counts in the function around it. Over
   this package's 256 functions at ddd8c19, NLOC was the body count plus one for 235 of them; the 21
   others differ by the signature's lines (`sig`, the `def` line included) and the nested bodies
   left out (`nest`), NLOC = body + sig − nest in every case:
@@ -345,9 +351,13 @@ On 2026-10-08, with jscpd 5.4.0 (the same session size):
   `tests/test_standards_groups.py` (`body_length` in the module is its definition).
 - What lizard 1.24.1 does not do, and how the group answers (measured the same day, from its
   `PythonIndents.set_nesting` and `FileInfoBuilder.end_of_function`). A function written on its
-  `def` line (`def f(x): return x`, or with the body on the line that closes the parameters) never
-  gets the deeper-indented line lizard waits for and is not listed; it holds one line of code and
-  the group leaves it. lizard's own `#lizard forgive` comment drops the function it closes (the
+  `def` line (`def f(x): return x`, or with the body on the line that closes the parameters)
+  holds one line of code and the group never counts it: lizard lists it only when a
+  deeper-indented line follows in the same block, and then charges it with that statement's lines
+  (`def noop(*_): ...` before a 30-line list was listed with 32), so the syntax tree's word that
+  the function ends on its `def` line drops the row. A nested function written on its `def` line
+  (`def inner(): ...`) takes lizard's place of the function around it, which is then not listed.
+  lizard's own `#lizard forgive` comment drops the function it closes (the
   one before it, not the one after), and a comment holding `GENERATED CODE` drops the rest of the
   file, which this module's own comments did when they named the two phrases and had to be
   reworded (a string literal is no comment to lizard); a function the syntax tree has, whose body
@@ -355,14 +365,23 @@ On 2026-10-08, with jscpd 5.4.0 (the same session size):
   not run, since nothing in a repository's files may loosen a limit. Any line after the
   parameters' `)` at the `def`'s indentation or less whose first token is not a `)` ends the
   function to lizard: a return annotation over several lines (`-> dict[`, `str, int`, `]:`), which
-  ruff format does write for a long one, left a function of 30 lines listed with 2, and a dedented
-  continuation line does the same; such a function is refused by name and line rather than counted
-  short. A multi-line string is one token and its lines at column 0 do no such thing. lizard's
+  ruff format does write for a long one, left a function of 30 lines listed with 2; such a
+  function is refused by name and line rather than counted short, and so is a dedented
+  continuation line, which ruff format never leaves (lizard's own reading of that one was not
+  measured; the refusal is the safe side). These refusals are the head's: at the base the same
+  function is left out, so the pull request that removes the shape from `main` is never refused
+  for it, and its finding, where the function is over the limit, counts as new. A multi-line
+  string is one token and its lines at column 0 do no such thing. lizard's
   `whitelizard.txt` filters its warnings only, never its CSV, and is looked for in the working
   directory, which is empty; a file given by name is read with or without `.gitignore`
   (`--no-gitignore` is passed all the same); its exit code is 0 under `--csv` whatever its own
   thresholds see; a module with a syntax error is listed as one function to its end, and the tree
   has no function at that line, so nothing is recorded for it, as before.
+- jscpd's columns count the bytes of the line's UTF-8, not its characters (2026-10-08). On a line
+  holding `"éééé😀"` before a copy it reported column 19 where the copy's character index was 11,
+  so the group cuts a side's anchor as bytes. And two functions of eight code lines with four
+  blank lines after their `def` line are a 12-line clone of 78 tokens at the floor: the blank
+  lines count toward the ten.
 
 ## Not yet measured
 
@@ -374,11 +393,6 @@ On 2026-10-08, with jscpd 5.4.0 (the same session size):
   been seen reading an answer beside its edit.
 - How long the coverage group takes on a large test suite, and whether the pre-push gate should
   leave it to CI there.
-- (Measured 2026-10-08, so no longer open: jscpd's columns count the bytes of the line's UTF-8,
-  not its characters. On a line holding `"éééé😀"` before a copy it reported column 19 where the
-  copy's character index was 11, so the group cuts a side's anchor as bytes. And two functions of
-  eight code lines with four blank lines after their `def` line are a 12-line clone of 78 tokens
-  at the floor: the blank lines count toward the ten.)
 - The `scorecard (report)` job on a GitHub runner: its steps were run here under a stub curl that
   delivers the wrong bytes (the digest check refuses and removes the file) and Scorecard itself on
   a clone of the tree, never the whole job on a runner; nor whether its Vulnerabilities and Fuzzing

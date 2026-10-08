@@ -27,6 +27,7 @@ from beethoven_qa.report import (
     NOT_IN_LOCK,
     PINNED,
     SECTIONS,
+    STOPPED,
     VENDOR_LANE,
     Enforcement,
     Evidence,
@@ -40,8 +41,10 @@ from beethoven_qa.report import (
     _groups,
     _lane_tasks,
     _lock_entries,
+    _Options,
     _ruleset,
     _run,
+    _subdir,
     _tasks,
     _workflows,
     conda_name_version,
@@ -61,6 +64,7 @@ from beethoven_qa.standards.findings import Finding
 from beethoven_qa.standards.sarif import Rule, Run, sarif_log
 
 REPO = Path(__file__).resolve().parent.parent
+OPTIONS = _Options(None, 3600)  # the command's defaults
 
 COUNTS = (
     "gate: conditions: 5 of 6 confirmed over all paths, 1 not confirmed within 20 s per "
@@ -161,7 +165,8 @@ def test_conda_file_names_from_the_lock() -> None:
 
 
 def test_the_real_lock_pins_every_tool_that_decides() -> None:
-    entries = _lock_entries(REPO)
+    note, entries = _lock_entries(REPO)
+    assert note.startswith("`pixi.lock` read: ")
     versions = dict(pinned(entries, PINNED))
     assert set(versions) == set(PINNED)
     assert NOT_IN_LOCK not in versions.values(), versions
@@ -189,14 +194,15 @@ def test_strip_credentials() -> None:
 
 
 def test_the_real_branch_rule_and_workflows() -> None:
-    required, strict = _ruleset(REPO / ".github" / "rulesets" / "main.json")
+    required, strict, bypass = _ruleset(REPO / ".github" / "rulesets" / "main.json")
     assert "gate (lock → lint, typecheck, tests, CrossHair/Z3)" in required
     assert "standards (every group green)" in required
     assert strict is True
+    assert bypass == ("OrganizationAdmin (always)",)  # a person can merge past the checks
     workflows = dict(_workflows(REPO))
     assert "report (evidence)" in workflows["ci.yml"]
     assert "report (evidence)" not in required  # the report is evidence, never a required check
-    assert _ruleset(REPO / "nowhere.json") == ((), None)
+    assert _ruleset(REPO / "nowhere.json") == ((), None, ())
 
 
 def test_the_real_tasks_are_the_lanes() -> None:
@@ -276,13 +282,15 @@ def _evidence(groups: tuple[GroupSummary, ...] = ()) -> Evidence:
         ("gate",),
         False,
         (("ci.yml", ("gate", "plugin")),),
+        (),
     )
-    decided = deciders(tools, groups, False)
+    decided = deciders(tools, lanes, groups, rule)
     return Evidence(
         "2026-10-08T00:00:00+00:00",
         __version__,
         Repository("abc123", "main", True, "https://example.invalid/r"),
         tools,
+        "`pixi.lock` read: 2 records",
         lanes,
         gate,
         groups,
@@ -293,15 +301,47 @@ def _evidence(groups: tuple[GroupSummary, ...] = ()) -> Evidence:
 
 
 def test_deciders_names_each_check_and_what_the_logs_say() -> None:
+    # The lane rows read what ran (two ruff commands are one tool, named once; a program the lock
+    # does not pin is called a program); a group's row names who found and who judged; the merge
+    # row names the rule's bypass, or no person.
     tools = (Tool("ruff", "0.16.10", "ruff 0.16.10"), Tool("crosshair-tool", "0.0.111", ""))
-    groups = (GroupSummary("design", "passed", (("beethoven-qa", "4.0.0"),), (), ()),)
-    rows = dict(deciders(tools, groups, True))
+    lanes = (
+        Lane("lint", ("ruff", "check", "src"), 0, 0.1, "lanes/lint-1.txt"),
+        Lane("lint", ("ruff", "format", "--check"), 0, 0.1, "lanes/lint-2.txt"),
+        Lane("typecheck", ("/usr/bin/mypy", "src"), 0, 0.1, "lanes/typecheck-1.txt"),
+        Lane("test", ("sh", "-c", "true"), 0, 0.1, "lanes/test-1.txt"),
+        Lane(VENDOR_LANE, ("python", "-m", "beethoven_qa", "vendor-check"), 0, 0.1, "lanes/v.txt"),
+    )
+    groups = (
+        GroupSummary("design", "passed", (("beethoven-qa", "4.0.0"),), (), ()),
+        GroupSummary("security", "passed", (("bandit", "1.9.4"),), (), ()),
+    )
+    bypass = ("OrganizationAdmin (always)",)
+    rule = Enforcement(
+        ".githooks", True, True, "pixi run --locked gate", ("gate",), True, (), bypass
+    )
+    rows = dict(deciders(tools, lanes, groups, rule))
     assert rows["lint"] == "a tool, ruff 0.16.10"
     assert rows["typecheck"] == f"a tool, mypy {NOT_IN_LOCK}"
+    assert rows["test"] == (
+        "the program `sh`, not one of the tools this report knows; what each test asserts is a "
+        "person's judgement"
+    )
     assert "crosshair-tool 0.0.111" in rows["symbolic, check 2: no counterexample within the bound"]
-    assert rows["standards: design"].startswith("home-made code, beethoven-qa 4.0.0, contracted")
-    assert VENDOR_LANE in rows and "no person" in rows["whether a change merges"]
-    assert VENDOR_LANE not in dict(deciders(tools, groups, False))
+    judge = f"the verdict over them: home-made code, beethoven-qa {__version__} (the limit, "
+    assert rows["standards: design"].startswith(
+        f"the findings: home-made code, beethoven-qa 4.0.0; {judge}"
+    )
+    assert rows["standards: security"].startswith(f"the findings: a tool, bandit 1.9.4; {judge}")
+    assert "proven" not in " ".join(w for _, w in rows.items())
+    assert VENDOR_LANE in rows
+    assert rows["whether a change merges"].endswith(
+        "the bypass the rule grants: OrganizationAdmin (always)"
+    )
+    unbypassed = dict(deciders(tools, lanes, groups, rule._replace(bypass=())))
+    assert unbypassed["whether a change merges"].endswith("; no person")
+    assert VENDOR_LANE not in dict(deciders(tools, lanes[:4], groups, rule))
+    assert dict(deciders(tools, (), groups, rule))["lint"] == "no command ran"
 
 
 def test_render_writes_every_section_and_escapes_what_it_tables(tmp_path: Path) -> None:
@@ -441,7 +481,7 @@ def _log() -> dict[str, object]:
 def test_the_command_end_to_end(tmp_path: Path, git_env: None) -> None:
     root = _throwaway(tmp_path)
     out = tmp_path / "evidence"
-    assert _run(root, out) == 1  # lint's second command fails
+    assert _run(root, out, OPTIONS) == 1  # lint's second command fails
     report = json.loads((out / "report.json").read_text(encoding="utf-8"))
     md = (out / "report.md").read_text(encoding="utf-8")
     assert report["format"] == 1 and report["version"] == __version__ and not report["passed"]
@@ -512,16 +552,35 @@ def test_the_command_end_to_end(tmp_path: Path, git_env: None) -> None:
         "required": ["gate"],
         "strict": True,
         "workflows": [["ci.yml", ["gate", "plugin"]]],
+        "bypass": [],
     }
-    assert dict(report["decided"])["standards: readability"] == "a tool, complexipy 8.0.1"
+    decided = dict(report["decided"])
+    assert decided["standards: readability"].startswith(
+        "the findings: a tool, complexipy 8.0.1; the verdict over them: home-made code, "
+        f"beethoven-qa {__version__} (the limit, the base matching), contracted and under the gate"
+    )
+    assert decided["lint"] == (
+        "the program `true`, not one of the tools this report knows; the program `false`, not "
+        "one of the tools this report knows"
+    )
+    assert decided["whether a change merges"].endswith("; no person")
+    assert report["lock"].startswith("`pixi.lock` read: 2 records; it names no environment for ")
     assert report["language_model"] and report["not_shown"]
     assert "| lint | false | 1 |" in md and f"HEAD `{head}` on `main`" in md
+    assert "| test | sh -c 'echo tests ran; exit 0' | 0 |" in md  # the argv as a shell reads it
+    assert report["lock"] in md
 
-    # Through the command line, with the failing command fixed and the tree now dirty.
+    # Through the command line, with the failing command fixed, the tree now dirty, a base handed
+    # to the standards lane, and a new folder: the one already written is refused.
     _write(root, "pixi.toml", _pixi_toml("true"))
-    assert main(["report", "--root", str(root), "--out", str(out)]) == 0
-    again = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    fresh = tmp_path / "evidence-2"
+    argv = ["report", "--root", str(root), "--out", str(fresh), "--base", "HEAD"]
+    assert main(argv) == 0
+    again = json.loads((fresh / "report.json").read_text(encoding="utf-8"))
     assert again["passed"] and not again["repository"]["clean"]
+    standards = next(lane for lane in again["lanes"] if lane["task"] == "standards")
+    assert standards["argv"][-4:] == ["--sarif", str(fresh / "sarif"), "--base", "HEAD"]
+    assert main(["report", "--root", str(root), "--out", str(out)]) == 2
 
 
 def test_the_command_refuses_what_it_cannot_run(
@@ -529,18 +588,100 @@ def test_the_command_refuses_what_it_cannot_run(
 ) -> None:
     root = _throwaway(tmp_path)
     out = tmp_path / "evidence"
+    # A folder holding an earlier report is refused and left as it is; a task table with its own
+    # cwd or env is refused, since the lane would run under conditions the report does not show.
+    used = tmp_path / "used"
+    (used / "lanes").mkdir(parents=True)
+    (used / "lanes" / "old.txt").write_text("an earlier run\n", encoding="utf-8")
+    assert _run(root, used, OPTIONS) == 2 and "is not empty" in capsys.readouterr().out
+    assert [p.name for p in (used / "lanes").iterdir()] == ["old.txt"]
+    _write(root, "pixi.toml", _pixi_toml("true") + 'extra = { cmd = "true", cwd = "src" }\n')
+    assert _run(root, out, OPTIONS) == 2 and "extra sets cwd" in capsys.readouterr().out
     (root / "pyproject.toml").unlink()
-    assert _run(root, out) == 2 and "pyproject.toml is missing" in capsys.readouterr().out
+    assert _run(root, out, OPTIONS) == 2 and "pyproject.toml is missing" in capsys.readouterr().out
     _write(root, "pyproject.toml", "")
     _write(root, "pixi.toml", "[tasks]\nlint = 'true'\n")
-    assert _run(root, out) == 2 and "has no task typecheck, test" in capsys.readouterr().out
+    assert (
+        _run(root, out, OPTIONS) == 2 and "has no task typecheck, test" in capsys.readouterr().out
+    )
     _write(root, "pixi.toml", "[workspace]\n")
-    assert _run(root, out) == 2 and "no [tasks] table" in capsys.readouterr().out
+    assert _run(root, out, OPTIONS) == 2 and "no [tasks] table" in capsys.readouterr().out
     (root / "pixi.toml").unlink()
-    assert _run(root, out) == 2 and "pixi.toml is missing" in capsys.readouterr().out
+    assert _run(root, out, OPTIONS) == 2 and "pixi.toml is missing" in capsys.readouterr().out
     bare = tmp_path / "bare"
     bare.mkdir()
     _write(bare, "pyproject.toml", "")
     _write(bare, "pixi.toml", _pixi_toml("true"))
-    assert _run(bare, out) == 2 and "git failed" in capsys.readouterr().out
+    assert _run(bare, out, OPTIONS) == 2 and "git failed" in capsys.readouterr().out
     assert not out.exists()  # nothing was written by a refused run
+
+
+def test_a_task_written_as_an_argv_list_is_one_command(tmp_path: Path, git_env: None) -> None:
+    root = _throwaway(tmp_path)
+    listed = _pixi_toml("true").replace(
+        'typecheck = "true"', 'typecheck = { cmd = ["sh", "-c", "exit 0"] }'
+    )
+    _write(root, "pixi.toml", listed)
+    assert _tasks(root)["typecheck"] == "sh -c 'exit 0'"
+    assert _run(root, tmp_path / "evidence", OPTIONS) == 0
+    report = json.loads((tmp_path / "evidence" / "report.json").read_text(encoding="utf-8"))
+    lane = next(lane for lane in report["lanes"] if lane["task"] == "typecheck")
+    assert lane["argv"] == ["sh", "-c", "exit 0"]
+
+
+def test_a_lane_that_runs_past_the_limit_is_stopped_and_named(
+    tmp_path: Path, git_env: None
+) -> None:
+    root = _throwaway(tmp_path)
+    _write(
+        root,
+        "pixi.toml",
+        _pixi_toml("true").replace('typecheck = "true"', 'typecheck = "sleep 30"'),
+    )
+    out = tmp_path / "evidence"
+    assert _run(root, out, _Options(None, 1)) == 1
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    lane = next(lane for lane in report["lanes"] if lane["task"] == "typecheck")
+    assert lane["exit"] == STOPPED and 1 <= lane["seconds"] < 20
+    text = (out / "lanes" / "typecheck-1.txt").read_text(encoding="utf-8")
+    assert "the lane was stopped after 1 s and counts as failed" in text
+    assert not report["passed"]
+
+
+def test_the_lock_is_read_for_this_machines_platform_alone(tmp_path: Path) -> None:
+    # pixi's lock lists every platform's records in one packages list; the default environment's
+    # list for this machine's platform (by the name a `platforms:` entry gives it) says which ran
+    # here, and another platform's version of a tool is never shown as this one's.
+    here = _subdir()
+    other = "other-64"
+    url = "https://conda.anaconda.org/conda-forge/{}/python-{}-h5f976f7_1_cpython.conda"
+    lock = textwrap.dedent(
+        f"""\
+        version: 7
+        platforms:
+        - name: named-{here}
+          subdir: {here}
+        environments:
+          default:
+            packages:
+              named-{here}:
+              - conda: {url.format(here, "3.11.17")}
+              {other}:
+              - conda: {url.format(other, "3.11.13")}
+        packages:
+        - conda: {url.format(here, "3.11.17")}
+        - conda: {url.format(other, "3.11.13")}
+        """
+    )
+    _write(tmp_path, "pixi.lock", lock)
+    note, entries = _lock_entries(tmp_path)
+    assert entries == (("python", "3.11.17"),)
+    assert note == (
+        f"`pixi.lock` read: 1 of its 2 records are the environment `default` for {here}, this "
+        "machine's platform"
+    )
+    _write(tmp_path, "pixi.lock", "packages: 3\n")
+    note, entries = _lock_entries(tmp_path)
+    assert entries == () and note.startswith("`pixi.lock` could not be read as a lock (Validation")
+    (tmp_path / "pixi.lock").unlink()
+    assert _lock_entries(tmp_path) == ("`pixi.lock` is missing, so no pinned version is known", ())

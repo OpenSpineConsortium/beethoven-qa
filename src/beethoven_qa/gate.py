@@ -705,7 +705,7 @@ _SUPPRESSION = re.compile(
     r"(?:(?:flake8|ruff)\s*:\s*)?noqa\b"
     r"|type\s*:\s*ignore\b"
     r"|mypy\s*:"
-    r"|isort\s*:\s*(?:skip|off)"
+    r"|(?:ruff\s*:\s*)?isort\s*:\s*(?:skip|off)"
     r"|fmt\s*:\s*(?:off|skip)\b"
     r"|nosec\b"
     r"|pragma[:\s]\s*no\s*cover\b"

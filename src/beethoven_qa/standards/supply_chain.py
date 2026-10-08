@@ -8,10 +8,16 @@ under ``.github/workflows/``, the way Scorecard defines them:
 
 - **Pinned-Dependencies**: every action a workflow uses, step or reusable workflow, is pinned to a
   full 40-character commit, never a tag or a branch that can be moved; a local action
-  (``./path``) and a container pinned by its ``sha256`` digest are pinned. A download piped into a
-  shell (``curl ... | sh``) runs whatever the server sends that day and is refused; so is a file a
-  step fetches with curl or wget and then runs, installs, unpacks or chmods without a sha256 check
-  in the same step (``sha256sum -c``, or a comparison with a 64-hex digest written there).
+  (``./path``) and a container pinned by its ``sha256`` digest are pinned. A download handed to a
+  shell or an interpreter to run (``curl ... | sh``, ``| python3``, ``bash <(curl ...)``,
+  ``eval "$(curl ...)"``) runs whatever the server sends that day and is refused; so is one piped
+  into an unpacker, and a file a step fetches with curl or wget (``-o``, ``-O``, ``>``, wget's own
+  naming, ``| tee``) that its job then runs, installs, unpacks, chmods or puts beside the commands
+  before a sha256 check names it (``sha256sum -c`` or ``shasum``, over that file or the line
+  piped into it, its failure not thrown away with ``|| true``), in that step or a later one of the
+  job. The script is read as the shell commands it holds, with their quotes and without their
+  comments, in order (``_commands``), so a digest in a comment, a check of another file or one
+  that comes after the use is none.
 - **Token-Permissions**: every workflow declares top-level ``permissions`` that grant no write; a
   job that needs to write says so on the job.
 - **Dangerous-Workflow**: a workflow started by ``pull_request_target`` or ``workflow_run`` runs
@@ -43,6 +49,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import NamedTuple
 
@@ -51,7 +58,7 @@ from beartype import beartype
 from pydantic import BaseModel, ConfigDict
 
 from beethoven_qa import __version__
-from beethoven_qa.contracts import ensure
+from beethoven_qa.contracts import ensure, require
 from beethoven_qa.standards.findings import Finding, blocking
 from beethoven_qa.standards.group import (
     Context,
@@ -112,14 +119,16 @@ RULES: dict[str, Rule] = {
         _rule(
             "pipe-to-shell",
             "PipeToShell",
-            "No download is piped into a shell.",
+            "No download is piped into a shell or an interpreter, or substituted into its "
+            "command line.",
             "Pinned-Dependencies",
         ),
         _rule(
             "unchecked-download",
             "UncheckedDownload",
-            "A file a step fetches and then runs, installs, unpacks or chmods is checked against a "
-            "sha256 digest in that step.",
+            "A file a step fetches and that its job then runs, installs, unpacks, chmods or puts "
+            "beside the commands is checked against a sha256 digest first; no download is piped "
+            "into an unpacker.",
             "Pinned-Dependencies",
         ),
         _rule(
@@ -145,27 +154,247 @@ RULES: dict[str, Rule] = {
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"docker://[^@\s]+@sha256:[0-9a-f]{64}")
-_PIPE = re.compile(r"\b(curl|wget)\b[^|\n;&]*\|\s*(sudo\s+)?(-?\w+\s+)*(ba|da|z|k)?sh\b")
-# A curl or wget whose output is a file: curl with -o, -O, --output or --remote-name among its
-# flags or its output redirected, wget unless it writes to stdout (-O-, -qO-, -O -). A command
-# runs to a pipe, a semicolon, an ampersand or the end of its line, a backslash-newline included.
-_FETCH = re.compile(
-    r"\bcurl\b(?:[^\n|;&]|\\\n)*(?:\s-[A-Za-z]*[oO]\b|\s--(?:output|remote-name)\b|\s>)"
-    r"|\bwget\b(?!(?:[^\n|;&]|\\\n)*-[A-Za-z]*O\s*-(?=\s|$))"
+# --- the shell a step runs ------------------------------------------------------------------------
+# A run script is read as the shell commands it holds: with their quotes (a `&` or a `;` inside a
+# quoted URL separates nothing), their comments dropped, a backslash-newline joined, in order; a
+# parenthesised run (a subshell, a command or process substitution) is one word, "$(...)", of the
+# command it belongs to. shlex does the reading, a line at a time.
+_OPERATOR = re.compile(r"\|\||&&|[|&;()]")
+_OPERATORS = frozenset({"|", "||", "&&", ";", "&"})
+_ASSIGNMENT = re.compile(r"\w+=")
+_FETCH_WORD = re.compile(r"\b(?:curl|wget)\b")
+# What only wraps a command: the shell's keywords and negation, sudo and the like, VAR=value.
+_WRAPPERS = frozenset(
+    {"sudo", "env", "nice", "time", "exec", "command", "if", "then", "else", "elif", "fi"}
+    | {"while", "until", "do", "done", "!", "{", "}"}
 )
-_COMMAND_END = re.compile(r"[|;&]|(?<!\\)\n")
-# What a step does with the file it fetched: makes it executable, installs, moves or unpacks it,
-# or runs it, by a path or through a shell or an interpreter.
-_USE = re.compile(
-    r"\b(?:chmod|install|mv|cp|tar|unzip|gunzip|unxz|sudo|bash|sh|zsh|python3?|node|perl)\b"
-    r"|(?:^|[\s;&|(])\.?/\S+",
-    re.MULTILINE,
+_FETCHERS = frozenset({"curl", "wget"})
+# What runs what it is given: a shell, an interpreter, or the shell's own ways of reading a file.
+_INTERPRETERS = frozenset(
+    {"sh", "bash", "dash", "zsh", "ksh", "python", "python2", "python3", "perl", "node", "ruby"}
+    | {"php", "eval", "source", "."}
 )
-# A digest check: sha256sum or shasum -a 256 told to check (-c, --check), or a 64-hex digest
-# written in the step for a comparison.
-_CHECKED = re.compile(
-    r"\b(?:sha256sum|shasum\s+-a\s*256)\b[^\n|;&]*\s(?:-\w*c\w*|--check)\b|\b[0-9a-f]{64}\b"
+_UNPACKERS = frozenset({"tar", "unzip", "gunzip", "unxz", "xz", "bsdtar", "bunzip2", "zcat"})
+_MOVERS = frozenset({"mv", "cp"})
+# What trusts a fetched file's content: running it, through an interpreter or by its own name,
+# making it executable, unpacking it, installing it, or moving or copying it beside the commands
+# (a path holding "bin").
+_USERS = (
+    _INTERPRETERS
+    | _UNPACKERS
+    | _MOVERS
+    | frozenset({"chmod", "install", "pip", "pip3", "pipx", "npm", "npx", "dpkg", "rpm", "apk"})
+    | frozenset({"apt", "apt-get"})
 )
+_HASHERS = ("sha256sum", "shasum")
+_SUBSTITUTION = re.compile(r"\$\(\s*(?:sudo\s+)?(?:curl|wget)\b")
+
+
+class _Command(NamedTuple):
+    before: str  # the operator before it: "" at the start, else "|", "||", "&&", ";" or "&"
+    words: tuple[str, ...]
+
+
+def _tokens(script: str) -> list[str]:
+    # shlex over each line (a backslash-newline joined first), with ";" between lines: words with
+    # their quotes removed, operators apart (a run of them split), comments dropped. A line shlex
+    # cannot read (an unclosed quote) stands as one word.
+    found: list[str] = []
+    for line in script.replace("\\\n", " ").split("\n"):
+        lexer = shlex.shlex(line, posix=True, punctuation_chars="|&;()")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        try:
+            words = list(lexer)
+        except ValueError:
+            words = [line.strip()]
+        for word in words:
+            found += _OPERATOR.findall(word) if re.fullmatch(r"[|&;()]+", word) else [word]
+        found.append(";")
+    return found
+
+
+def _grouped(tokens: list[str]) -> list[str]:
+    # Each parenthesised run folded into one word, "$(...)", so a subshell, a command or a process
+    # substitution is a word of the command it belongs to; an unclosed one stands word by word.
+    found: list[str] = []
+    inner: list[str] = []
+    depth = 0
+    for token in tokens:
+        if token == "(":
+            depth += 1
+            inner += [token] if depth > 1 else []
+        elif token == ")" and depth:
+            depth -= 1
+            if depth:
+                inner.append(token)
+            else:
+                found.append(f"$({' '.join(inner)})")
+                inner = []
+        elif depth:
+            inner.append(token)
+        else:
+            found.append(token)
+    return found + inner
+
+
+def _commands(script: str) -> list[_Command]:
+    # The commands of a script in order, each with the operator before it; an operator with no
+    # command before it waits for the next (a pipe ending a line, its command on the next).
+    found: list[_Command] = []
+    words: list[str] = []
+    before = ""
+    for token in _grouped(_tokens(script)):
+        if token not in _OPERATORS:
+            words.append(token)
+        elif words:
+            found.append(_Command(before, tuple(words)))
+            words, before = [], token
+        elif token != ";":
+            before = token
+    return found + ([_Command(before, tuple(words))] if words else [])
+
+
+def _bare(words: tuple[str, ...]) -> tuple[str, ...]:
+    # The command without what only wraps it: the shell's keywords, sudo and the like with their
+    # options, VAR=value assignments.
+    rest = list(words)
+    while rest and (rest[0] in _WRAPPERS or rest[0].startswith("-") or _ASSIGNMENT.match(rest[0])):
+        rest.pop(0)
+    return tuple(rest)
+
+
+def _head(words: tuple[str, ...]) -> str:
+    # The name of the command, its directory dropped (/usr/bin/bash is bash, ./tool is tool).
+    bare = _bare(words)
+    return bare[0].rsplit("/", 1)[-1] if bare else ""
+
+
+def _url_name(args: tuple[str, ...]) -> str:
+    # The name a remote file is kept under when the fetch gives none: the last component of the
+    # URL's path, its query dropped.
+    url = next((a for a in args if "://" in a), args[-1] if args else "")
+    return url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+
+
+def _redirected(args: tuple[str, ...]) -> str | None:
+    # The file the command's output is redirected to, `> f` or `>f`; None when it is not.
+    for i, arg in enumerate(args):
+        if arg.startswith(">") and not arg.startswith(">&"):
+            return arg.lstrip(">") or (args[i + 1] if i + 1 < len(args) else "")
+    return None
+
+
+def _short(arg: str, letter: str) -> bool:
+    # Whether a one-dash option cluster ends with the letter (-o, -fsSLo).
+    return arg.startswith("-") and not arg.startswith("--") and arg.endswith(letter)
+
+
+def _curl_output(args: tuple[str, ...]) -> str:
+    # Where curl writes: the file -o or --output names (`-` is its stdout), the remote name under
+    # -O or --remote-name, else its stdout ("").
+    for i, arg in enumerate(args):
+        following = args[i + 1] if i + 1 < len(args) else ""
+        if arg == "--output" or _short(arg, "o"):
+            return "" if following == "-" else following
+        remote = arg.startswith("-") and not arg.startswith("--") and "O" in arg
+        if arg == "--remote-name" or remote:
+            return _url_name(args)
+    return ""
+
+
+def _wget_named(arg: str, following: str) -> str | None:
+    # The output a wget option names: the file, "-" for its stdout (-O -, -O-, -qO-,
+    # --output-document=-), None when the option names none.
+    if arg.startswith("--output-document="):
+        return arg.split("=", 1)[1]
+    if arg == "--output-document" or _short(arg, "O"):
+        return following
+    return "-" if _short(arg, "O-") else None
+
+
+def _wget_output(args: tuple[str, ...]) -> str:
+    # Where wget writes: the file an option names, its stdout (""), else the remote name.
+    for i, arg in enumerate(args):
+        named = _wget_named(arg, args[i + 1] if i + 1 < len(args) else "")
+        if named is not None:
+            return "" if named == "-" else named
+    return _url_name(args)
+
+
+def _fetched(words: tuple[str, ...]) -> str | None:
+    # The file a curl or wget command writes, "" when it writes to its stdout, None when the
+    # command is no fetch.
+    head, args = _head(words), _bare(words)[1:]
+    if head not in _FETCHERS:
+        return None
+    redirected = _redirected(args)
+    if redirected is not None:
+        return redirected
+    return _curl_output(args) if head == "curl" else _wget_output(args)
+
+
+def _names(words: tuple[str, ...], file: str) -> bool:
+    # Whether a command names the fetched file: its last component as a word of its own or at
+    # the end of a path, inside a quoted argument too ("<digest>  /usr/local/bin/pixi").
+    base = re.escape(file.rsplit("/", 1)[-1])
+    pattern = re.compile(rf"(?<![\w.-]){base}(?![\w.-])")
+    return any(pattern.search(word) for word in words)
+
+
+def _piped_into(commands: list[_Command], i: int) -> str:
+    # The name of the command that reads command i's output through a pipe, "" when none does.
+    after = commands[i + 1] if i + 1 < len(commands) else None
+    return _head(after.words) if after is not None and after.before == "|" else ""
+
+
+def _checks(commands: list[_Command], i: int, file: str) -> bool:
+    # Whether command i checks the file's digest: sha256sum or shasum run with the file named, in
+    # it or in the command piped into it, and its failure not thrown away (`|| true`).
+    words = commands[i].words
+    hashing = any(hasher in word for hasher in _HASHERS for word in words)
+    piped = commands[i].before == "|" and i > 0 and _names(commands[i - 1].words, file)
+    after = commands[i + 1] if i + 1 < len(commands) else None
+    thrown = after is not None and after.before == "||" and _head(after.words) in {"true", ":"}
+    return hashing and (_names(words, file) or piped) and not thrown
+
+
+def _uses(words: tuple[str, ...], file: str) -> bool:
+    # Whether a command trusts the fetched file's content (_USERS): mv and cp only when they put
+    # it beside the commands, a path holding "bin".
+    head = _head(words)
+    if head and head == file.rsplit("/", 1)[-1]:
+        return True
+    if head in _MOVERS:
+        return _names(words, file) and any("bin" in word.lower() for word in words[1:])
+    return head in _USERS and _names(words, file)
+
+
+def _used_first(commands: list[_Command], i: int, file: str) -> bool:
+    # Whether the file command i fetched is used before any command checks its digest.
+    for j in range(i + 1, len(commands)):
+        if _checks(commands, j, file):
+            return False
+        if _uses(commands[j].words, file):
+            return True
+    return False
+
+
+def _unchecked(commands: list[_Command], i: int) -> bool:
+    # Whether command i fetches something the job trusts unchecked: a file it goes on to use
+    # before a digest check names it (`| tee f` makes a file), or a stream piped into an unpacker.
+    file = _fetched(commands[i].words)
+    if file is None:
+        return False
+    into = _piped_into(commands, i)
+    if file == "" and into == "tee":
+        args = _bare(commands[i + 1].words)[1:]
+        file = next((word for word in args if not word.startswith("-")), "")
+    if file == "":
+        return into in _UNPACKERS
+    return _used_first(commands, i, file)
+
+
 _EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
 # GitHub's own list of untrusted input, from its security hardening guide for Actions.
 _UNTRUSTED = re.compile(
@@ -230,35 +459,44 @@ def untrusted(script: str) -> tuple[str, ...]:
 
 
 @beartype
-@ensure(lambda result, script: not result or "|" in script, "a pipe needs a |")
+@require(lambda script: "\0" not in script, "a script holds no NUL")
+@ensure(
+    lambda result, script: not result or _FETCH_WORD.search(script) is not None,
+    "a report needs a curl or wget",
+)
+@ensure(lambda result, script: not result or "|" in script or "(" in script, "piped or substituted")
 def pipes_to_shell(script: str) -> bool:
-    """Whether ``script`` pipes a ``curl`` or ``wget`` download into a shell."""
-    return _PIPE.search(script) is not None
+    """Whether ``script`` hands a ``curl`` or ``wget`` download to a shell or an interpreter to
+    run: piped into one, or substituted into its command line (``$(curl ...)``, ``<(curl ...)``)."""
+    commands = _commands(script)
+    for i, command in enumerate(commands):
+        if _fetched(command.words) == "" and _piped_into(commands, i) in _INTERPRETERS:
+            return True
+        substituted = any(_SUBSTITUTION.search(word) for word in command.words)
+        if substituted and _head(command.words) in _INTERPRETERS:
+            return True
+    return False
 
 
 @beartype
+@require(lambda script, later: "\0" not in script + later, "a script holds no NUL")
 @ensure(
-    lambda result, script: not result or _FETCH.search(script) is not None,
-    "a report needs a curl or wget that writes a file",
+    lambda result, script: not result or _FETCH_WORD.search(script) is not None,
+    "a report needs a curl or wget in the step itself",
 )
-@ensure(
-    lambda result, script: not result or _CHECKED.search(script) is None,
-    "a step that checks a digest is never reported",
-)
-def unchecked_download(script: str) -> bool:
-    """Whether ``script`` fetches a file with curl or wget and goes on to run, install, unpack or
-    chmod something, with no sha256 check anywhere in the same step."""
-    fetch = _FETCH.search(script)
-    if fetch is None or _CHECKED.search(script) is not None:
-        return False
-    end = _COMMAND_END.search(script, fetch.start())
-    return _USE.search(script, end.start() if end else len(script)) is not None
+def unchecked_download(script: str, later: str = "") -> bool:
+    """Whether ``script`` fetches a file with curl or wget that it, or the steps ``later`` in its
+    job, goes on to run, install, unpack, chmod or put beside the commands before a sha256 check
+    names it; or pipes a download into an unpacker."""
+    mine = _commands(script)
+    commands = mine + _commands(later)
+    return any(_unchecked(commands, i) for i in range(len(mine)))
 
 
 @beartype
 @ensure(lambda result: result in ("error", "note"), "an error or a note")
 @ensure(
-    lambda result, severity: (result == "error") == (severity in BLOCKING),
+    lambda result, severity: (result == "error") == (severity in ("Medium", "High")),
     "an error exactly for a High or Medium severity; any other word, a note",
 )
 def level_for(severity: str) -> str:
@@ -323,12 +561,16 @@ def _unpinned(where: _Where, uses: object) -> list[Finding]:
 
 
 def _download(script: str) -> str:
-    # The download command as the step writes it, to the end of its line: the finding's needle.
-    fetch = _FETCH.search(script)
-    return script[fetch.start() if fetch else 0 :].split("\n", 1)[0].strip()
+    # The download command as the step writes it, its line: the finding's needle.
+    for line in script.splitlines():
+        if _FETCH_WORD.search(line) and not line.lstrip().startswith("#"):
+            return line.strip()
+    return script.split("\n", 1)[0].strip()
 
 
-def _script(where: _Where, run: object) -> list[Finding]:
+def _script(where: _Where, run: object, later: str = "") -> list[Finding]:
+    # ``later``: the run scripts of the steps after this one in its job, where a use of what this
+    # step fetched is a use.
     if not isinstance(run, str):
         return []
     found = [
@@ -342,12 +584,13 @@ def _script(where: _Where, run: object) -> list[Finding]:
         for expression in untrusted(run)
     ]
     if pipes_to_shell(run):
-        why = "a download is piped into a shell"
-        found.append(_finding(where, "pipe-to-shell", "|", why))
-    if unchecked_download(run):
+        why = "a download is handed to a shell or an interpreter to run"
+        found.append(_finding(where, "pipe-to-shell", _download(run), why))
+    if unchecked_download(run, later):
         why = (
-            "a download is run, installed, unpacked or chmodded without a digest check in its "
-            "step; check it with sha256sum -c first"
+            "a download is run, installed, unpacked, chmodded or put beside the commands, in this "
+            "step or a later one of the job, before a sha256 check names it; check it with "
+            "sha256sum -c first"
         )
         found.append(_finding(where, "unchecked-download", _download(run), why))
     return found
@@ -365,11 +608,14 @@ def _checkout(where: _Where, step: dict[object, object]) -> list[Finding]:
 
 def _steps(where: _Where, steps: list[object], dangerous: bool) -> list[Finding]:
     found = []
-    for i, step in enumerate(s for s in steps if isinstance(s, dict)):
+    shaped = [s for s in steps if isinstance(s, dict)]
+    runs = [s.get("run") for s in shaped]
+    for i, step in enumerate(shaped):
         label = step.get("name") or step.get("uses") or f"step {i + 1}"
         inside = where._replace(place=f"{where.job}/{label}")
         found += _unpinned(inside, step.get("uses"))
-        found += _script(inside, step.get("run"))
+        later = "\n".join(r for r in runs[i + 1 :] if isinstance(r, str))
+        found += _script(inside, step.get("run"), later)
         found += _checkout(inside, step) if dangerous else []
     return found
 

@@ -76,7 +76,7 @@ _HELP = "https://bandit.readthedocs.io/en/latest/plugins/index.html"
 @ensure(lambda result: result in ("error", "note"), "an error or a note")
 @ensure(
     lambda result, severity, confidence: (
-        (result == "error") == (severity in BLOCKING and confidence in BLOCKING)
+        (result == "error") == ({severity, confidence} <= {Grade.MEDIUM, Grade.HIGH})
     ),
     "an error exactly when both the severity and the confidence are medium or high",
 )

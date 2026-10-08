@@ -9,9 +9,11 @@ name: automerge
 #
 # The rule is strict (strict_required_status_checks_policy): a pull request whose branch fell
 # behind main waits until it carries main, since the checks ran on a tree main would never hold
-# (measured 2026-10-08: without it, main's tree after a merge was never what the checks ran on).
-# Bringing the branch up to date is the session's own step, merge main in, gate, push: a push a
-# bot makes with GITHUB_TOKEN starts no workflow, so no automation here does it.
+# (measured 2026-10-08 over the parallel streams' merges: without it, main's tree after each was
+# not what the checks ran on). Bringing the branch up to date is the session's own step, merge
+# main in, gate, push: a push a bot makes with GITHUB_TOKEN starts no workflow, so no automation
+# here does it, and a pull request nobody drives (its session gone) waits there until a person
+# clicks Update branch or merges main into it.
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]

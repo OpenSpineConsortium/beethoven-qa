@@ -28,9 +28,9 @@ permissions:
 
 jobs:
   gate:
-    # The substrate reconstructs from the lock alone, then the four gates run inside it. The tests
-    # include the gate run against two throwaway packages and the pinned copy's round trip in
-    # throwaway git checkouts.
+    # The substrate reconstructs from the lock alone, then the gate's lanes run inside it (the
+    # standards are standards.yml's). The tests include the gate run against two throwaway
+    # packages and the pinned copy's round trip in throwaway git checkouts.
     name: gate (lock → lint, typecheck, tests, CrossHair/Z3)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -56,6 +56,8 @@ jobs:
         run: pixi run --locked typecheck
       - name: tests (typeguard enclave)
         run: pixi run --locked test
+      - name: boundary (the interface standard's rules)
+        run: pixi run --locked boundary
       - name: symbolic verification (CrossHair + Z3)
         run: pixi run --locked symbolic
       - name: shell syntax of the kit
@@ -115,8 +117,27 @@ jobs:
           pixi --version
       - name: reconstruct the environment from the lock
         run: pixi install --locked
+      - name: the commit the new code starts from
+        # The same base as standards.yml gives its groups, so the report's standards section
+        # says what the required check said of the same commit; on a push to main the lane's
+        # own default (the merge base with main) would be the commit itself, and nothing new.
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base=auto
+          if [ "$EVENT" = pull_request ]; then
+            base=HEAD^1
+          elif [ "$EVENT" = push ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            base="$BEFORE"
+          elif [ "$EVENT" = push ]; then
+            base=none  # a new branch or a rewritten one: no commit to compare with
+          fi
+          echo "BASE=$base" >> "$GITHUB_ENV"
+          echo "the new code starts from: $base"
       - name: the evidence report
-        run: pixi run --locked report
+        run: pixi run --locked report --base "$BASE"
       - name: keep the report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

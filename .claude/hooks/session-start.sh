@@ -17,6 +17,10 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ] && [ "${BEETHOVEN_SETUP_FORCE:-}" != 
 fi
 
 ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# The gate runs before every push (.githooks/pre-push), in a cloud session as on a laptop: set
+# first, before anything below can fail, so a session whose pixi never arrives still refuses a
+# push rather than making one with no gate.
+(cd "$ROOT" && git config core.hooksPath .githooks) || true
 # The pixi version the committed pixi.lock was produced with, and the sha256 of its release asset
 # pixi-x86_64-unknown-linux-musl: this repository's own measurement of 2026-10-08, from two
 # downloads at different times, equal to the binary the session that pinned the lock runs; pixi's
@@ -59,7 +63,5 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
         echo "export PIXI_NO_PATH_UPDATE=1"
     } >> "$CLAUDE_ENV_FILE"
 fi
-# The gate runs before every push (.githooks/pre-push), in a cloud session as on a laptop.
-(cd "$ROOT" && git config core.hooksPath .githooks) || true
 echo "session-start: $(pixi --version) and the locked environment are ready; run 'pixi run --locked gate'."
 exit 0

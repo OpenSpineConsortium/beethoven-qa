@@ -337,6 +337,31 @@ def test_what_lizard_leaves_out_or_would_cut_short(
             _check(root, "readability")
     assert main(["standards", "readability", "--root", str(root), "--base", "HEAD"]) == 2
     assert "readability: could not run: the length check cannot trust" in capsys.readouterr().out
+    # A nested function written on its def line takes lizard's place of the one around it.
+    nested = "def outer(a):\n    def inner(): ...\n\n    return inner\n"
+    _write(root, {f"{PKG}/new.py": nested})
+    with pytest.raises(RuntimeError, match="`outer` is not listed.*nested function written on"):
+        _check(root, "readability")
+    # A one-line function before a bracketed literal: lizard lists it with the literal's lines
+    # (measured 2026-10-08: 32 for a 30-line list); a function that ends on its def line is never
+    # counted, whatever lizard charged it with.
+    stubbed = "def noop(*_): ...\n\n\nX = [\n" + "".join(f"    {i},\n" for i in range(30)) + "]\n"
+    _write(tmp_path, {f"{PKG}/stub.py": stubbed})
+    assert readability._lizard(tmp_path, [f"{PKG}/stub.py"]) == []
+
+
+def test_a_shape_lizard_cannot_count_at_the_base_never_refuses_the_change_that_removes_it(
+    tmp_path: Path,
+) -> None:
+    # The base is read with the same tools, but a function lizard cannot be trusted on there is
+    # left out instead of refused: the pull request that puts the signature on one line must be
+    # able to merge, and its finding, where the function is over the limit, is new.
+    annotated = "def cut(a) -> dict[\n    str, int\n]:\n" + _statements(30)
+    root = _repo(tmp_path, {f"{PKG}/old.py": annotated})
+    _write(root, {f"{PKG}/old.py": "def cut(a) -> dict[str, int]:\n" + _statements(30)})
+    assert _lengths(_check(root, "readability")) == {"cut": (31, "new")}
+    _write(root, {f"{PKG}/old.py": "def cut(a) -> dict[str, int]:\n    return {}\n"})
+    assert _check(root, "readability").passed
 
 
 # --- design -------------------------------------------------------------------------------------
@@ -801,9 +826,10 @@ jobs:
 """
 
 # A third party's action and an install outside a lockfile, with zizmor told to look away in every
-# way it accepts: an inline comment (spelled from its parts, since the gate refuses one written
-# out), and an ignore rule in both places a configuration file lives.
-LOOK_AWAY_COMMENT = "# " + "zizmor: " + "ignore[unpinned-uses]"
+# way it accepts: an inline comment (held in a string, which the gate's check, a reader of
+# comments, never sees, so it is written out), and an ignore rule in both places a configuration
+# file lives.
+LOOK_AWAY_COMMENT = "# zizmor: ignore[unpinned-uses]"
 THIRD = f"""\
 name: third
 on: [push]
@@ -832,31 +858,77 @@ def test_supply_chain_rules() -> None:
     assert not supply_chain.grants_write({"a": "read"}) and not supply_chain.grants_write(None)
     script = 'echo "${{ github.head_ref }}" ${{ github.sha }}'
     assert supply_chain.untrusted(script) == (" github.head_ref ",)
-    assert supply_chain.pipes_to_shell("wget -qO- x | sh")
-    assert not supply_chain.pipes_to_shell("curl x > f")
     assert supply_chain.level_for("High") == supply_chain.level_for("Medium") == "error"
     assert supply_chain.level_for("Low") == supply_chain.level_for("Informational") == "note"
 
 
-def test_a_download_the_step_goes_on_to_use_needs_a_digest_check() -> None:
+def test_a_download_handed_to_a_shell_or_an_interpreter_is_refused() -> None:
+    # Piped into one, through wrappers, with a quoted `&` that separates nothing; substituted into
+    # its command line as $(...) or <(...); on a line continued after the pipe. Not: written to a
+    # file, piped into something that only reads, or named in a comment.
+    handed = (
+        "wget -qO- x | sh",
+        'curl -fsSL "https://x.invalid/a?b=1&c=2" | sudo -E env A=1 /bin/bash',
+        "curl -s https://x.invalid/i.py | python3 -",
+        "curl -fsSL https://example.invalid/install.sh | sudo bash",
+        "curl -fsSL https://x.invalid/i.sh |\n  sh -s -- --yes",
+        "bash <(curl -fsSL https://x.invalid/i.sh)",
+        'bash -c "$(curl -fsSL https://x.invalid/i.sh)"',
+        'eval "$(wget -qO- https://x.invalid/env.sh)"',
+    )
+    kept = (
+        "curl x > f",
+        "curl -s https://x.invalid/v.json | jq .tag",
+        "curl -o f https://x.invalid/f && bash f",
+        "wget -O - https://x.invalid/i | tee i.sh",
+        "echo 'curl x | sh' # a comment",
+    )
+    assert all(supply_chain.pipes_to_shell(s) for s in handed)
+    assert not any(supply_chain.pipes_to_shell(s) for s in kept)
+
+
+def test_a_download_the_job_goes_on_to_use_needs_a_digest_check_first() -> None:
     fetch = 'curl -fsSL -o /usr/local/bin/pixi \\\n  "https://example.invalid/v${V}/pixi"\n'
     use = "chmod 0755 /usr/local/bin/pixi\npixi --version\n"
-    assert supply_chain.unchecked_download(fetch + use)
-    assert supply_chain.unchecked_download("wget https://example.invalid/a.tgz\ntar xzf a.tgz\n")
-    assert supply_chain.unchecked_download("curl -O https://example.invalid/a.sh && bash a.sh\n")
-    assert not supply_chain.unchecked_download(fetch)  # fetched and left alone
-    # Checked against a digest, in either form the rule names, before the use.
     digest = "0" * 64
     check = f'echo "{digest}  /usr/local/bin/pixi" | sha256sum -c -\n'
-    assert not supply_chain.unchecked_download(fetch + check + use)
-    check = 'echo "$PIXI_SHA256  /usr/local/bin/pixi" | sha256sum --status --check -\n'
-    assert not supply_chain.unchecked_download(fetch + check + use)
-    check = f'test "$(sha256sum /usr/local/bin/pixi | cut -c1-64)" = {digest} || exit 1\n'
-    assert not supply_chain.unchecked_download(fetch + check + use)
-    # A download piped into a shell is the pipe rule's, and a pipe to stdout fetches no file.
-    assert not supply_chain.unchecked_download("curl -fsSL https://example.invalid/i.sh | sh\n")
-    assert not supply_chain.unchecked_download("wget -qO- https://example.invalid/i.sh | sh\n")
-    assert not supply_chain.unchecked_download("wget -O - https://example.invalid/i | bash\n")
+    unchecked = (
+        fetch + use,
+        "wget https://example.invalid/a.tgz\ntar xzf a.tgz\n",  # wget's own name for the file
+        "curl -O https://example.invalid/a.sh && bash a.sh\n",  # curl's remote name
+        "curl -fsSL https://x.invalid/t > t && chmod +x t && ./t\n",  # a redirection
+        "curl -fsSL https://x.invalid/i.sh | tee i.sh && bash i.sh\n",  # tee makes the file
+        "curl -fsSL https://x.invalid/a.tgz | tar xz\n",  # a stream into an unpacker
+        fetch + f"# {digest}  /usr/local/bin/pixi\n" + use,  # a digest in a comment
+        fetch + use + check,  # checked after the use
+        fetch + f'echo "{digest}  other" | sha256sum -c -\n' + use,  # another file checked
+        fetch + check.replace("\n", " || true\n") + use,  # the check's failure thrown away
+        # A file fetched and copied beside the commands; a data file copied elsewhere is left.
+        "curl -o data.json x\ncp data.json /usr/local/bin/tool\n",
+    )
+    assert all(supply_chain.unchecked_download(s) for s in unchecked)
+    checked = (
+        fetch,  # fetched and left alone
+        fetch + check + use,
+        fetch + 'echo "$PIXI_SHA256  /usr/local/bin/pixi" | sha256sum --status --check -\n' + use,
+        fetch
+        + f'test "$(sha256sum /usr/local/bin/pixi | cut -c1-64)" = {digest} || exit 1\n'
+        + use,
+        fetch + check.replace("\n", " || { rm -f /usr/local/bin/pixi; exit 1; }\n") + use,
+        "curl -o data.json https://x.invalid/d.json\ncat data.json\ncp data.json out/\n",
+        "curl -o data.json https://x.invalid/d.json\n/tmp/pixi install --locked\n./run-tests.sh\n",
+        # A download piped into a shell is the pipe rule's; a pipe to stdout fetches no file.
+        "curl -fsSL https://example.invalid/i.sh | sh\n",
+        "wget -qO- https://example.invalid/i.sh | sh\n",
+        "wget -O - https://example.invalid/i | bash\n",
+        "curl -s https://x.invalid/v.json | jq .tag\n",
+    )
+    assert not any(supply_chain.unchecked_download(s) for s in checked)
+    # The steps after the fetching one in its job: a use there is a use, a check there a check,
+    # and a fetch there is that step's own.
+    assert supply_chain.unchecked_download(fetch, use)
+    assert not supply_chain.unchecked_download(fetch, check + use)
+    assert not supply_chain.unchecked_download("", "curl -o t x\nchmod +x t\n")
 
 
 def test_workflows_are_held_to_scorecards_checks(tmp_path: Path) -> None:
@@ -887,6 +959,53 @@ def test_workflows_are_held_to_scorecards_checks(tmp_path: Path) -> None:
     reader, audits = report.runs
     assert (reader.tool, audits.tool) == ("beethoven-qa", "zizmor")
     assert re.fullmatch(r"\d+\.\d+\.\d+", audits.version), audits.version
+
+
+TWO_STEPS = f"""\
+name: two
+on: [push]
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@{SHA}
+        with:
+          persist-credentials: false
+      - name: fetch
+        run: curl -fsSL -o "$RUNNER_TEMP/tool" https://example.invalid/tool
+      - name: use
+        run: |
+          chmod +x "$RUNNER_TEMP/tool"
+          "$RUNNER_TEMP/tool" --version
+"""
+
+
+def test_a_download_a_later_step_of_the_job_uses_is_the_fetching_steps_finding(
+    tmp_path: Path,
+) -> None:
+    root = _repo(tmp_path, {})
+    _write(root, {".github/workflows/two.yml": TWO_STEPS})
+    report = _check(root, "supply-chain")
+    ours = [f for run in report.runs for f in run.findings if f.rule.startswith("supply-chain/")]
+    assert [(f.rule, f.line) for f in ours] == [("supply-chain/unchecked-download", 13)]
+    needle = 'curl -fsSL -o "$RUNNER_TEMP/tool" https://example.invalid/tool'
+    assert ours[0].anchor == f"j/fetch: {needle}"
+    # A check in a step between them clears it.
+    check = f'      - run: echo "{"0" * 64}  $RUNNER_TEMP/tool" | sha256sum -c -\n'
+    _write(
+        root,
+        {
+            ".github/workflows/two.yml": TWO_STEPS.replace(
+                "      - name: use\n", check + "      - name: use\n"
+            )
+        },
+    )
+    report = _check(root, "supply-chain")
+    assert not [
+        f for run in report.runs for f in run.findings if f.rule.startswith("supply-chain/")
+    ]
 
 
 def test_zizmor_is_read_at_the_regular_persona_and_nothing_tells_it_to_look_away(
@@ -953,9 +1072,12 @@ def test_this_repositorys_own_workflows_pass_the_reader_and_zizmor() -> None:
     assert report.passed, report.summary
     recorded = {(f.rule, f.level) for run in report.runs for f in run.findings}
     assert recorded == {("zizmor/adhoc-packages", "note")}
-    # The hook is no workflow, so the reader never sees it; its download keeps the rule anyway.
+    # The hook is no workflow, so the reader never sees it; its download keeps the rule anyway,
+    # and the rule sees the download: with its digest line gone, the same script is refused.
     hook = (REPO / ".claude" / "hooks" / "session-start.sh").read_text(encoding="utf-8")
-    assert supply_chain._FETCH.search(hook) and not supply_chain.unchecked_download(hook)
+    assert not supply_chain.unchecked_download(hook) and not supply_chain.pipes_to_shell(hook)
+    unchecked = "\n".join(line for line in hook.splitlines() if "sha256sum" not in line)
+    assert supply_chain.unchecked_download(unchecked)
 
 
 def test_a_workflow_with_no_permissions_is_reported_where_its_jobs_start(tmp_path: Path) -> None:

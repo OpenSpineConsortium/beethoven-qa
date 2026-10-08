@@ -14,22 +14,29 @@ function of the package:
   travel together are one NamedTuple.
 - **At most 25 lines of code in a body** (Code Climate's default method length, which the Drive
   file quotes), measured by lizard as NLOC: the lines that hold code from the ``def`` to the
-  function's last line, the docstring, comments and blank lines not counted. NLOC counts the
-  ``def`` line and each further line of the signature with the body, so the limit on it is 26, one
-  for the ``def`` line, and a signature over several lines spends some of the 25. A function
-  written on its ``def`` line (``def f(x): return x``) lizard does not list; it holds one line of
-  code.
+  function's last line, a docstring in triple quotes, comments and blank lines not counted, and a
+  multi-line string counted where lizard counts it (one assigned or passed as an argument; one
+  after ``yield`` or as a dict's value, and the pieces of an f-string, it takes for a comment and
+  leaves out; measured 2026-10-08). NLOC counts the ``def`` line and each further line of the
+  signature with the body, so the limit on it is 26, one for the ``def`` line, and a signature
+  over several lines spends some of the 25. A function written on its ``def`` line
+  (``def f(x): return x``) holds one line of code and is never counted, whether lizard lists it
+  (it does when a deeper-indented line follows in the same block, and gives it that line's
+  statement) or not.
 
 Nested functions are measured on their own; of a nested function only its ``def`` line counts in
 the function around it. lizard names a method without its class and a nested function
 ``outer.inner``, so each of its rows is matched to the module's syntax tree by file and start line
 (the ``def`` line, for a decorated function and a multi-line signature alike) and anchored by the
 qualified name found there, the anchor the group used before lizard, so old findings still match.
-Two shapes lizard cannot be trusted on are refused with their reason instead of counted: a
-function it leaves out although its body begins on a line of its own (a ``#lizard forgive`` or a
-``GENERATED CODE`` comment hides one, and nothing in a repository's files may loosen a limit), and
-a function with a line at its ``def``'s indentation after the parameters' closing parenthesis (a
-return annotation over several lines), which lizard 1.24.1 takes for the function's end.
+Two shapes lizard cannot be trusted on are refused with their reason instead of counted, at the
+head of a change; at the base they are left out, so a change that removes one is never refused
+for it: a function it leaves out although its body begins on a line of its own (a
+``#lizard forgive`` or a ``GENERATED CODE`` comment hides one, and nothing in a repository's
+files may loosen a limit; a nested function written on its ``def`` line, ``def inner(): ...``,
+takes lizard's place of the function around it), and a function with a line at its ``def``'s
+indentation after the parameters' closing parenthesis (a return annotation over several lines),
+which lizard 1.24.1 takes for the function's end.
 
 What is not here: the Buse-Weimer and Scalabrino readability models the Drive file describes are
 classifiers trained on people's ratings, and no maintained open implementation of either exists to
@@ -123,7 +130,7 @@ RULES: dict[str, Rule] = {
         LENGTH,
         "FunctionLength",
         "A function holds at most 26 lines of code as lizard counts them (NLOC): the def line and "
-        "its signature, and 25 lines of body; docstring, comments and blanks not counted.",
+        "25 more, its signature and body together; docstring, comments and blanks not counted.",
         "Method length; 25 lines in the body is Code Climate's default, as the Drive file quotes "
         "it, and lizard's NLOC counts the def line with them.",
         "https://docs.codeclimate.com/docs/maintainability",
@@ -288,9 +295,10 @@ def _layout(source: str) -> _Layout:
 def _cut_short(node: ast.FunctionDef | ast.AsyncFunctionDef, layout: _Layout) -> int | None:
     # The first line after the parameters' ) that lizard would take for the function's end: one
     # at the def's indentation or less whose first token is not a ) (lizard's one exception). A
-    # return annotation over several lines ends like that; so does a continuation line someone
-    # dedented, which ruff format never leaves. Measured 2026-10-08: such a function was listed
-    # with the lines up to there and the rest of its body went to the module.
+    # return annotation over several lines ends like that (measured 2026-10-08: such a function
+    # was listed with the lines up to there and the rest of its body went to the module); a
+    # continuation line someone dedented, which ruff format never leaves, is refused the same way
+    # rather than measured.
     starts, closes = layout
     deeper = (node.col_offset + 1, "")  # a line with no code on it is no line start to lizard
     for n in range(closes.get(node.lineno, node.lineno) + 1, (node.end_lineno or node.lineno) + 1):
@@ -306,7 +314,8 @@ def _cut_short(node: ast.FunctionDef | ast.AsyncFunctionDef, layout: _Layout) ->
 # in a comment of this module, or lizard applies it here).
 _UNLISTED = (
     "`{name}` is not listed by lizard, as a `#lizard forgive` or a `GENERATED CODE` comment makes "
-    "it, and nothing in a repository's files may loosen a limit"
+    "it (nothing in a repository's files may loosen a limit), or a nested function written on its "
+    "def line (put its body on a line of its own)"
 )
 _CUT_SHORT = (
     "`{name}` has a line at its def's indentation (line {line}), which lizard takes for its end, "
@@ -314,11 +323,13 @@ _CUT_SHORT = (
 )
 
 
-def _untrusted(source: str, defs: dict[int, tuple[str, int]], listed: dict[int, int]) -> list[str]:
-    # The functions whose NLOC lizard does not give or gives wrong, each with its reason, for the
-    # group to refuse rather than count: one lizard leaves out although its body begins on a line
-    # of its own (one written on its def line never gets the deeper-indented line lizard waits
-    # for, is not listed, and holds one line of code), and one lizard would cut short.
+def _untrusted(
+    source: str, defs: dict[int, tuple[str, int]], listed: dict[int, int]
+) -> list[tuple[int, str]]:
+    # The functions whose NLOC lizard does not give or gives wrong, each by its def line with its
+    # reason, for the group to refuse rather than count: one lizard leaves out although its body
+    # begins on a line of its own (one written on its def line holds one line of code and is
+    # never counted, listed or not), and one lizard would cut short.
     try:
         module = ast.parse(source)
     except (SyntaxError, ValueError):
@@ -331,13 +342,33 @@ def _untrusted(source: str, defs: dict[int, tuple[str, int]], listed: dict[int, 
         name, first = defs[node.lineno][0], node.body[0]
         own_line = layout[0].get(first.lineno, (-1, ""))[0] == first.col_offset
         if own_line and node.lineno not in listed:
-            problems.append(_UNLISTED.format(name=name))
+            problems.append((node.lineno, _UNLISTED.format(name=name)))
         if (cut := _cut_short(node, layout)) is not None:
-            problems.append(_CUT_SHORT.format(name=name, line=cut))
+            problems.append((node.lineno, _CUT_SHORT.format(name=name, line=cut)))
     return problems
 
 
-def _lizard(tree: Path, files: list[str]) -> list[Measure]:
+def _measured(rel: str, source: str, listed: dict[int, int], strict: bool) -> list[Measure]:
+    # One file's measures. ``strict``: refuse the file on a function lizard cannot be trusted on
+    # (the head of a change); else leave such functions out (the base: a change that removes the
+    # shape must not be refused for what the base held, and a finding on the fixed function then
+    # counts as new).
+    defs = _definitions(source)
+    problems = _untrusted(source, defs, listed)
+    if problems and strict:
+        why = "; ".join(reason for _, reason in problems)
+        raise RuntimeError(f"the length check cannot trust {rel}: {why}")
+    doubtful = {line for line, _ in problems}
+    found = []
+    for start, nloc in sorted(listed.items()):
+        name, end = defs.get(start, ("", start))
+        # A function on its def line is one line of code whatever lizard charged it with.
+        if start in defs and start not in doubtful and end > start:
+            found.append(Measure(LENGTH, rel, name, start, end, nloc))
+    return found
+
+
+def _lizard(tree: Path, files: list[str], strict: bool = True) -> list[Measure]:
     if not files:
         return []
     argv = [_bin("lizard"), "--csv", "-l", "python", "--no-gitignore"]
@@ -345,17 +376,7 @@ def _lizard(tree: Path, files: list[str]) -> list[Measure]:
     if out.returncode != 0:
         raise RuntimeError(f"lizard failed: {out.stderr.strip()}")
     rows = _rows(tree, out.stdout)
-    found = []
-    for rel in files:
-        source, listed = _read(tree, rel), rows.get(rel, {})
-        defs = _definitions(source)
-        if problems := _untrusted(source, defs, listed):
-            raise RuntimeError(f"the length check cannot trust {rel}: " + "; ".join(problems))
-        for start, nloc in sorted(listed.items()):
-            if start in defs:
-                name, end = defs[start]
-                found.append(Measure(LENGTH, rel, name, start, max(end, start), nloc))
-    return found
+    return [m for rel in files for m in _measured(rel, _read(tree, rel), rows.get(rel, {}), strict)]
 
 
 def _findings(measures: list[Measure]) -> tuple[Finding, ...]:
@@ -375,7 +396,8 @@ def _check(context: Context) -> Report:
         return _findings(_complexipy(tree, files, context.package))
 
     def length(tree: Path) -> tuple[Finding, ...]:
-        return _findings(_lizard(tree, _python_files(tree, context.package)))
+        files = _python_files(tree, context.package)
+        return _findings(_lizard(tree, files, strict=tree == context.root))
 
     tools = (
         (("complexipy", _version([_bin("complexipy"), "--version"])), cognitive, (COGNITIVE,)),

@@ -12,8 +12,10 @@ checked out; a red gate refuses the push; SKIP_GATE=1 skips it and says so.
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -325,19 +327,69 @@ def test_a_download_that_is_not_the_one_measured_fails_the_step_and_is_removed(
     assert len((bin_dir / "curl-calls").read_text().splitlines()) == 1
 
 
+@pytest.mark.parametrize(
+    ("workflow", "step"), [("ci.yml", "install pixi"), ("standards.yml", "install pixi")]
+)
+def test_a_download_that_is_the_one_measured_is_kept_and_run(
+    tmp_path: Path, workflow: str, step: str
+) -> None:
+    # The step's other branch: the bytes whose digest the workflow names arrive, the check
+    # passes, the file is made executable and runs (the stand-in answers its --version).
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    body = b"#!/bin/sh\necho pixi 0.81.0\n"
+    record = _stub_curl(bin_dir, body)
+    script = _step_command(REPO / ".github" / "workflows" / workflow, step)
+    script = script.replace("/usr/local/bin/pixi", str(tmp_path / "pixi"))
+    digest = hashlib.sha256(body).hexdigest()
+    env = {**_env(bin_dir), "PIXI_VERSION": "0.81.0", "PIXI_SHA256": digest}
+    env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+    argv = ["bash", "-eo", "pipefail", "-c", script]
+    done = subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, env=env)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "pixi 0.81.0" in done.stdout and os.access(tmp_path / "pixi", os.X_OK)
+    assert len(record.read_text().splitlines()) == 1
+
+
 def _hook(tmp_path: Path, bin_dir: Path) -> subprocess.CompletedProcess[str]:
-    # The session-start hook as a cloud session runs it, on a throwaway home and project.
+    # The session-start hook as a cloud session runs it, on a throwaway home and a throwaway
+    # repository as the project, whose hooks path the hook sets.
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
     env = {**_env(bin_dir), "HOME": str(home), "CLAUDE_CODE_REMOTE": "true"}
-    env["CLAUDE_PROJECT_DIR"] = str(tmp_path / "project")
-    (tmp_path / "project").mkdir(exist_ok=True)
+    env["CLAUDE_PROJECT_DIR"] = str(project)
+    subprocess.run(["git", "init", "-q", str(project)], check=True, env=env)
     return subprocess.run(
         ["bash", str(REPO / ".claude" / "hooks" / "session-start.sh")],
         capture_output=True,
         text=True,
         env=env,
     )
+
+
+def _hooks_path(tmp_path: Path, bin_dir: Path) -> str:
+    argv = ["git", "-C", str(tmp_path / "project"), "config", "--get", "core.hooksPath"]
+    done = subprocess.run(argv, capture_output=True, text=True, env=_env(bin_dir), check=False)
+    return done.stdout.strip()
+
+
+def _stub_curl_copying(bin_dir: Path, source: Path) -> Path:
+    # Stands in for curl with a file of this machine: the bytes arrive whole, and the digest
+    # check alone decides what becomes of them.
+    record = bin_dir / "curl-calls"
+    curl = bin_dir / "curl"
+    curl.write_text(
+        "#!/bin/bash\n"
+        f"printf '%s\\n' \"$*\" >> '{record}'\n"
+        'out=""\n'
+        'while [ $# -gt 0 ]; do if [ "$1" = -o ]; then out="$2"; shift; fi; shift; done\n'
+        f'[ -n "$out" ] && cp \'{source}\' "$out"\n'
+        "exit 0\n"
+    )
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return record
 
 
 def test_the_hook_keeps_no_pixi_whose_digest_differs(tmp_path: Path) -> None:
@@ -349,6 +401,34 @@ def test_the_hook_keeps_no_pixi_whose_digest_differs(tmp_path: Path) -> None:
     assert "sha256 differs" in done.stdout and "removed" in done.stdout
     assert sorted(p.name for p in (tmp_path / "home" / ".pixi" / "bin").iterdir()) == []
     assert len(record.read_text().splitlines()) == 1
+    # The push gate was pointed at before the download, so a session with no pixi still has it.
+    assert _hooks_path(tmp_path, bin_dir) == ".githooks"
+
+
+def test_the_hook_keeps_a_pixi_whose_digest_is_the_one_measured(tmp_path: Path) -> None:
+    # The other branch, with the bytes of this machine's own pixi: kept, executable and under its
+    # final name when its digest is the measured one (a GitHub runner's pixi is, installed by the
+    # workflow's own checked download), else refused like any other file. Which branch this
+    # machine takes is decided by the digest here, never assumed; with no pixi on the machine the
+    # hook file itself stands in, and that is the refusing branch.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    hook = REPO / ".claude" / "hooks" / "session-start.sh"
+    measured = re.search(r"^PIXI_SHA256=([0-9a-f]{64})$", hook.read_text(), re.MULTILINE)
+    assert measured is not None
+    found = shutil.which("pixi") or str(Path.home() / ".pixi" / "bin" / "pixi")
+    source = Path(found) if Path(found).is_file() else hook
+    record = _stub_curl_copying(bin_dir, source)
+    done = _hook(tmp_path, bin_dir)
+    assert done.returncode == 0, done.stderr
+    assert len(record.read_text().splitlines()) == 1
+    assert _hooks_path(tmp_path, bin_dir) == ".githooks"
+    kept = tmp_path / "home" / ".pixi" / "bin" / "pixi"
+    if hashlib.sha256(source.read_bytes()).hexdigest() == measured.group(1):
+        assert kept.is_file() and os.access(kept, os.X_OK), done.stdout
+        assert "sha256 differs" not in done.stdout and not (kept.parent / "pixi.tmp").exists()
+    else:
+        assert "sha256 differs" in done.stdout and not kept.exists()
 
 
 def test_the_hook_fetches_nothing_when_its_pixi_is_already_there(tmp_path: Path) -> None:

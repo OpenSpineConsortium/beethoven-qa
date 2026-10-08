@@ -522,6 +522,7 @@ f = 6  # mypy: ignore-errors
 # flake8: noqa
 # mypy: disable-error-code="assignment"
 # isort: skip_file
+# ruff: isort: skip_file
 # fmt: off
 #lizard forgive
 h = 7  # this comment says GENERATED CODE mid-sentence, and lizard would read no further
@@ -560,6 +561,7 @@ def test_gate_refuses_suppressions_and_skipped_tests(tmp_path: Path) -> None:
         "# flake8: noqa",
         '# mypy: disable-error-code="assignment"',
         "# isort: skip_file",
+        "# ruff: isort: skip_file",
         "# fmt: off",
         "#lizard forgive",
         "# this comment says GENERATED CODE mid-sentence, and lizard would read no further",
@@ -585,7 +587,7 @@ def test_gate_refuses_suppressions_and_skipped_tests(tmp_path: Path) -> None:
     ):
         line = _line(HIDDEN_TESTS, needle)
         assert f"gate: skip tests/test_hidden.py:{line}: {name}: a test is never skipped" in out
-    assert out.count("gate: skip ") == 13 and out.count("gate: suppression ") == 15, out
+    assert out.count("gate: skip ") == 13 and out.count("gate: suppression ") == 16, out
     assert "vendor" not in out, out
     assert "gate: instead of a suppression:" in out
 
