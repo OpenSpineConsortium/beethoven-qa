@@ -251,10 +251,12 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   consumer takes it with its next copy (`vendor --kit`); a consumer that re-pins to a release whose
   kit changed without `--kit` fails `vendor-check` on the file that differs until it does, by
   design. Release 2.0.0 adds `standards.yml` and changes `automerge.yml` and `rulesets.yml` (actions
-  pinned to a commit, writes granted on the job only). The release after 4.0.0 changes
+  pinned to a commit, writes granted on the job only). Release 5.0.0 changes
   `standards.yml` (the pixi download checked against its sha256 before it is run, the
-  `scorecard (report)` job) and `session-start.sh` (the same digest check; a pixi whose digest
-  differs is removed and said so, and the session still starts).
+  `scorecard (report)` job), `session-start.sh` (the same digest check; a pixi whose digest
+  differs is removed and said so, and the session still starts) and `automerge.yml` (its header
+  says what the strict checks policy of `.github/rulesets/main.json` means for a branch behind
+  `main`).
 - `plugin/` and `.claude-plugin/marketplace.json`: the Claude Code plugin `beethoven-qa` (skills,
   the `stream` agent, the workflows `gate-until-green`, `verify-module`, `improve-module`, and from
   4.0.0 the code standards' `PostToolUse` hook under `plugin/hooks/`). On a

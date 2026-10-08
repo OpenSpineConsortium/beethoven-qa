@@ -160,7 +160,10 @@ gate:
 name = "<repo>"
 version = "0.0.0"
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+# One platform, named apart from its subdirectory because it states a glibc floor: jscpd (the
+# duplication detector, from PyPI) ships manylinux_2_34 wheels only. A `[target.linux-64.…]` table
+# still applies under the named entry (measured with pixi 0.81.0, 2026-10-08).
+platforms = [{ name = "linux-64-glibc234", platform = "linux-64", glibc = "2.34" }]
 # Only while no package comes from both conda-forge and PyPI; beethoven-qa's pixi.toml says why.
 conda-pypi-map = false
 
@@ -182,10 +185,13 @@ bandit = ">=1.9"
 coverage = ">=7.10"
 pyyaml = ">=6"
 types-pyyaml = ">=6"
+zizmor = ">=1.30"
+lizard = ">=1.24"
 # The repository's own dependencies follow here.
 
 [pypi-dependencies]
 crosshair-tool = ">=0.0.60"
+jscpd = ">=5.4"
 
 [activation]
 # The repository's package and the pinned copy, imported without a build step. Absolute, so an
@@ -201,6 +207,8 @@ symbolic = "python -m beethoven_qa gate"
 standards = "python -m beethoven_qa standards all"
 vendor-check = "python -m beethoven_qa vendor-check"
 boundary = "python -m beethoven_qa boundary"
+# The evidence report (docs/REPORT.md of beethoven-qa): every lane above run and written up.
+report = "python -m beethoven_qa report"
 gate = { depends-on = ["lint", "typecheck", "test", "boundary", "symbolic", "standards", "vendor-check"] }
 hooks = "git config core.hooksPath .githooks"
 ```
@@ -704,6 +712,49 @@ dialog, which a cloud session never shows; no thread has tried it.
    `{"hooks": {"PostToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command",
    "command": "bash \"$CLAUDE_PROJECT_DIR\"/vendor/beethoven-qa/plugin/hooks/coach.sh",
    "timeout": 60}]}]}}`. That file is the repository's own, not the kit's.
+   **From 4.0.0 to 5.0.0**: the release makes the gate stricter, puts three established tools
+   beside the home-made code, and adds the `report` command. Take it with `--ref v5.0.0 --kit`,
+   then, in the same change:
+   - **The gate.** It now runs CrossHair with every condition's verdict on every run (the old
+     `--report-all` is the default; the flag stays accepted and changes nothing), prints under
+     each target and at the end how many conditions were confirmed over all paths and how many
+     were not confirmed within the bound, and fails on a precondition no input can meet: either a
+     vacuous contract, or one stated over values CrossHair 0.0.111 cannot build (a `str` checked
+     against a set of names, measured 2026-10-08 in beethoven-qa's own `security.level_for` and
+     in four functions of beethoven-agents: `bee.accounts.host_transcript`,
+     `bee.handoff.extraction_prompt`, `bee.handoff.hydration_prompt`, `guard.check_path`).
+     Restate such a contract over an enum (a `Literal` makes CrossHair 0.0.111 raise), or list the
+     function under `[tool.beethoven-qa.unproven]` with that reason. The gate also refuses, in the
+     package and in `tests/`, every suppression comment (`# noqa`, `# type: ignore`, `# nosec`,
+     `# pragma: no cover`, `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`, the
+     file-level forms, lizard's `forgive` and `GENERATED CODE`) and every pytest or unittest skip
+     or expected failure: remove them and fix what they hid.
+   - **The dependency lines.** Add `zizmor` and `lizard` (conda-forge) and `jscpd` (PyPI) as
+     step 2 now shows them, and give the platform entry jscpd's glibc floor
+     (`platforms = [{ name = "linux-64-glibc234", platform = "linux-64", glibc = "2.34" }]`); a
+     `[target.linux-64.…]` table still applies under the named entry, and so does one named
+     `linux-64-glibc234` (measured with pixi 0.81.0, 2026-10-08). Re-lock on purpose and say so.
+     The readability group now refuses to run on a function lizard cannot count (a return
+     annotation over several lines, a dedented continuation line), naming it; put the signature
+     on one line. The duplication group's floor is jscpd's: 10 lines and 40 of its tokens.
+   - **The kit is at version 2.** All five files are still the kit: `.githooks/pre-push`,
+     `.github/workflows/automerge.yml`, `.github/workflows/rulesets.yml`,
+     `.claude/hooks/session-start.sh` and `.github/workflows/standards.yml`; three of them change
+     (`standards.yml` checks the pixi download against its digest and gains the `scorecard
+     (report)` job, which is not a required check; `session-start.sh` checks the same download;
+     `automerge.yml` says what the strict policy below means). `--kit` takes all five. The
+     repository's own `ci.yml` is not the kit's: give its pixi download the same digest check
+     (step 5 shows it; the supply-chain group now reports a download a step goes on to run without
+     one) and, if the report is wanted on every run, the `report (evidence)` job from
+     beethoven-qa's `ci.yml`, which is not a required check either; add the `report` task to
+     `pixi.toml` as step 2 shows.
+   - **The ruleset.** Set `strict_required_status_checks_policy` to `true` in
+     `.github/rulesets/main.json` (step 5): a pull request whose branch fell behind `main` then
+     waits until its branch carries `main`. A session updates its own branch (merge `main` in,
+     gate, push); nothing automates it, because a push made with `GITHUB_TOKEN` starts no checks.
+   - **The `cli` export is at version 3** (`report` added; `--report-all` the default): change
+     the import in the repository's `interface/INTERFACE.json`, or the boundary lane says the copy
+     no longer offers `cli` version 2.
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
    old and the new release; then a pull request, ready for review, which merges when the gate is
    green. A red gate after an update is reported red and fixed at its cause, in the consumer's code
