@@ -4,7 +4,7 @@
 
 [project]
 name = "beethoven-qa"
-version = "3.0.0"
+version = "4.0.0"
 description = "Beethoven code-writing and verification framework: contracts, layered types, the CrossHair/Z3 gate"
 requires-python = ">=3.11"
 # Runtime dependencies are pinned by pixi.lock (here, and in every repository that carries a copy of

@@ -9,6 +9,7 @@ SARIF logs checked, every log against the OASIS schema.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -19,7 +20,16 @@ from pathlib import Path
 import pytest
 
 from beethoven_qa.__main__ import main
-from beethoven_qa.standards import coverage, design, duplication, run, security, supply_chain
+from beethoven_qa.standards import (
+    coach,
+    coverage,
+    design,
+    duplication,
+    readability,
+    run,
+    security,
+    supply_chain,
+)
 from beethoven_qa.standards.group import Context, Report
 from beethoven_qa.standards.sarif import sarif_log
 from test_standards import validate_sarif
@@ -490,3 +500,111 @@ def test_untracked_files_are_new_and_links_are_not_read(tmp_path: Path) -> None:
     changes = run._changes(root, run._resolve(root, "HEAD"))
     assert dict(changes.lines)[f"{PKG}/fresh.py"] == ((1, 2),)
     assert f"{PKG}/link.py" not in dict(changes.lines)
+
+
+# --- coaching (the coach command behind the plugin's PostToolUse hook) -------------------------
+
+
+def test_which_groups_coach_which_file() -> None:
+    assert coach.groups_for(f"{PKG}/mod.py", PKG) == coach.CHEAP
+    assert "coverage" not in coach.CHEAP  # it runs the tests: not on every edit
+    assert coach.groups_for(".github/workflows/ci.yml", PKG) == coach.WORKFLOW
+    assert coach.groups_for(".github/workflows/ci.yaml", PKG) == coach.WORKFLOW
+    for elsewhere in (
+        "tests/test_x.py",
+        f"{PKG}/data.json",
+        ".github/workflows/x/y.yml",
+        "README.md",
+    ):
+        assert coach.groups_for(elsewhere, PKG) == ()
+    assert coach.groups_for("src/pkgextra/mod.py", PKG) == ()  # a prefix of the name is not it
+
+
+def test_what_the_session_is_told() -> None:
+    assert coach.reason("a.py", (), 3) == ""
+    lines = tuple(f"a.py:{n}: rule: message (new)" for n in range(1, 6))
+    told = coach.reason("a.py", lines, 3)
+    assert told.splitlines()[0].endswith("would block this change in CI, in a.py:")
+    assert all(line in told for line in lines[:3]) and lines[3] not in told
+    assert "and 2 more" in told and "code-standards skill" in told
+
+
+def _published(tmp_path: Path, files: dict[str, str]) -> Path:
+    # A repository whose base is on origin/main, so the coach's `auto` base is that commit.
+    root = _repo(tmp_path, files)
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(remote))
+    _git(root, "remote", "add", "origin", str(remote))
+    _git(root, "push", "-q", "origin", "main")
+    _git(root, "fetch", "-q", "origin")
+    return root
+
+
+def _coached(
+    root: Path, edited: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> str:
+    # What the command prints for an Edit of ``edited`` (a path as the hook gives it), with exit 0.
+    call = {"tool_name": "Edit", "tool_input": {"file_path": edited, "old_string": "x"}}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(call)))
+    assert main(["coach", "--root", str(root)]) == 0
+    return capsys.readouterr().out
+
+
+def test_an_edit_that_breaks_a_limit_is_told_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _published(tmp_path, {f"{PKG}/legacy.py": TANGLED})
+    _write(root, {f"{PKG}/new.py": TANGLED.replace("tangled", "again")})
+    answer = json.loads(_coached(root, str(root / PKG / "new.py"), monkeypatch, capsys))
+    assert answer["decision"] == "block"
+    assert f"in {PKG}/new.py:" in answer["reason"]
+    assert "`again`: its cognitive complexity is 19, more than 15 (new)" in answer["reason"]
+    # What the base already held is not the session's to fix now, and neither is another file's.
+    assert _coached(root, str(root / PKG / "legacy.py"), monkeypatch, capsys) == ""
+    _write(root, {f"{PKG}/clean.py": "def fine(x):\n    return x\n"})
+    assert _coached(root, f"{PKG}/clean.py", monkeypatch, capsys) == ""  # a relative path too
+
+
+def test_a_workflow_edit_is_held_to_the_supply_chain_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _published(tmp_path, {})
+    _write(root, {".github/workflows/bad.yaml": BAD})
+    edited = str(root / ".github/workflows/bad.yaml")
+    told = json.loads(_coached(root, edited, monkeypatch, capsys))["reason"]
+    said = [line for line in told.splitlines() if line.startswith("  .github/workflows/bad.yaml:")]
+    assert len(said) == 6 and "supply-chain/pinned-action" in told and " more" not in told
+
+
+def test_coaching_says_nothing_when_it_cannot_or_should_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _published(tmp_path, {"tests/test_x.py": "def test_x():\n    assert True\n"})
+    _write(root, {f"{PKG}/new.py": TANGLED, "notes.txt": "x\n"})
+    (root / PKG / "link.py").symlink_to(root / PKG / "new.py")
+    outside = tmp_path / "outside.py"
+    outside.write_text(TANGLED, encoding="utf-8")
+    for edited in (str(root / "notes.txt"), str(root / "tests/test_x.py"), str(outside)):
+        assert _coached(root, edited, monkeypatch, capsys) == "", edited
+    for edited in (str(root / PKG / "link.py"), str(root / PKG / "gone.py"), ""):
+        assert _coached(root, edited, monkeypatch, capsys) == "", edited
+    for text in ("not json", "[]", '{"tool_input": {"file_path": 3}}', "{}"):
+        monkeypatch.setattr("sys.stdin", io.StringIO(text))
+        assert main(["coach", "--root", str(root)]) == 0
+        assert capsys.readouterr().out == "", text
+    _git(root, "remote", "remove", "origin")  # no base to tell: CI's rule cannot be applied
+    assert _coached(root, str(root / PKG / "new.py"), monkeypatch, capsys) == ""
+
+
+def test_a_group_that_cannot_run_leaves_the_others_to_speak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _published(tmp_path, {})
+    _write(root, {f"{PKG}/new.py": TANGLED + "\n\n" + "def run(cmd):\n    return eval(cmd)\n"})
+
+    def broken(context: Context) -> Report:
+        raise RuntimeError("complexipy failed")
+
+    monkeypatch.setattr(readability, "_check", broken)
+    told = json.loads(_coached(root, str(root / PKG / "new.py"), monkeypatch, capsys))["reason"]
+    assert "readability/" not in told and "security/B307" in told

@@ -1,4 +1,5 @@
-"""The command line: ``python -m beethoven_qa gate | standards | vendor | vendor-check | boundary``.
+"""The command line: ``python -m beethoven_qa gate | standards | coach | vendor | vendor-check |
+boundary``.
 
 Wiring and I/O only, so the gate exempts this module from the contract rule (pyproject.toml); the
 logic it calls lives in contracted, symbolically checked functions of gate.py, vendor.py,
@@ -15,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from beethoven_qa import __version__, boundary, gate, vendor
+from beethoven_qa.standards import coach
 from beethoven_qa.standards import run as standards
 
 
@@ -56,6 +58,10 @@ def _standards_parser(s: argparse.ArgumentParser) -> None:
     s.add_argument("--sarif", type=Path, help="write each group's SARIF 2.1.0 log into DIR")
 
 
+def _coach_parser(c: argparse.ArgumentParser) -> None:
+    c.add_argument("--root", type=Path, default=Path("."), help="repository root (default: .)")
+
+
 def _vendor_parser(v: argparse.ArgumentParser) -> None:
     v.add_argument("--into", type=Path, required=True, help="root of the consuming repository")
     v.add_argument(
@@ -93,6 +99,12 @@ _COMMANDS: tuple[tuple[str, str, Callable[[argparse.ArgumentParser], None]], ...
         "standards",
         "the code standards, each group on its own, on the code new since a base commit",
         _standards_parser,
+    ),
+    (
+        "coach",
+        "for Claude Code's PostToolUse hook: what the cheap groups would block in the file an edit "
+        "touched, as the hook's JSON on stdout, or nothing",
+        _coach_parser,
     ),
     (
         "vendor",
@@ -134,12 +146,23 @@ _GIT_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
 }
 
 
+def _coach(args: argparse.Namespace) -> int:
+    # Always 0: an answer is advice beside an edit that has already happened, and an exit code
+    # Claude Code reads as a failure would turn a missing tool into noise in the session.
+    answer = coach._run(args.root, sys.stdin.read())
+    if answer:
+        print(answer)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     args = _parser().parse_args(argv)
     if args.command == "gate":
         return _gate(args)
     if args.command == "standards":
         return _standards(args)
+    if args.command == "coach":
+        return _coach(args)
     try:
         return _GIT_COMMANDS[args.command](args)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:

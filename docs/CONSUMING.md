@@ -680,6 +680,16 @@ dialog, which a cloud session never shows; no thread has tried it.
    export is at version 2, because `--ref` is new and required: change the consumer's import of
    `cli` in `interface/INTERFACE.json` to version 2 in the same change, or the boundary lane says
    the copy no longer offers `cli` version 1. The kit and the dependency lines are unchanged.
+   **From 3.0.0 to 4.0.0**: the release adds the `coach` command and the plugin's `PostToolUse`
+   hook that runs it (`docs/STANDARDS.md`, "For a session writing code"), and makes the
+   readability and security groups several times faster. Take it with `--ref v4.0.0 --kit`; the
+   kit, the dependency lines and the `cli` export's version (2: a command added) are unchanged.
+   Sessions that load the plugin get the hook with the copy. A repository whose sessions do not
+   load it (a cloud session, which reads only the repository's own settings) may name the copy's
+   script in its own `.claude/settings.json`, the way beethoven-qa's does:
+   `{"hooks": {"PostToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command",
+   "command": "bash \"$CLAUDE_PROJECT_DIR\"/vendor/beethoven-qa/plugin/hooks/coach.sh",
+   "timeout": 60}]}]}}`. That file is the repository's own, not the kit's.
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
    old and the new release; then a pull request, ready for review, which merges when the gate is
    green. A red gate after an update is reported red and fixed at its cause, in the consumer's code
