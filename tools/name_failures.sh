@@ -72,8 +72,12 @@ for ((i = 1; i <= failed && i <= most; i++)); do
   block="$blocks/$i"
   errors=$(tail -n +2 "$block" | grep -F ': error: ' || true)
   if [ -n "$errors" ]; then
-    count=$(printf '%s\n' "$errors" | wc -l)
-    detail=$(printf '%s\n' "$errors" | head -n 20)
+    # Cut in the shell, not with head on a pipe: head leaves after twenty lines, and printf, still
+    # writing what the pipe could not hold, dies of the broken pipe, which pipefail makes this
+    # script's exit 141 (on GitHub's runner, 2026-10-09).
+    mapfile -t lines <<<"$errors"
+    count=${#lines[@]}
+    detail=$(printf '%s\n' "${lines[@]:0:20}")
     [ "$count" -le 20 ] || detail+=$'\n'"and $((count - 20)) more error lines, in the job's log"
   else
     detail=$'(no error line; its last lines)\n'"$(tail -n +2 "$block" | tail -n 15)"

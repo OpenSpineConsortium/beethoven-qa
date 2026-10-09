@@ -120,12 +120,15 @@ def test_past_the_first_four_failed_targets_the_summary_still_names_every_one(
 
 
 def test_a_long_run_of_error_lines_is_cut_and_says_so(tmp_path: Path) -> None:
-    errors = "".join(f"/src/p.py:{i}: error: {'x' * 2000}\n" for i in range(25))
+    # More than a pipe holds (200 lines of 1000 characters once cut): the script once cut them
+    # with head on a pipe and died of the broken pipe, at random with 25 lines on GitHub's runner
+    # and every time with these.
+    errors = "".join(f"/src/p.py:{i}: error: {'x' * 2000}\n" for i in range(200))
     named = _name(tmp_path, "symbolic", f"gate: p.g: exit 1\n{errors}")
     lines = named[0][1].splitlines()
     assert len(lines) == 1 + 20 + 1
     assert all(len(line) == 1000 for line in lines[1:21])
-    assert lines[-1] == "and 5 more error lines, in the job's log"
+    assert lines[-1] == "and 180 more error lines, in the job's log"
 
 
 def test_another_lane_is_named_by_the_lines_that_say_why_and_its_last_lines(
