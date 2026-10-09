@@ -33,7 +33,9 @@ jobs:
     # packages and the pinned copy's round trip in throwaway git checkouts.
     name: gate (lock → lint, typecheck, tests, CrossHair/Z3)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Measured on 5.0.0's pull request (2026-10-09): the tests 2 min 30 s, the symbolic lane
+    # 26 min over 56 targets, the job 28 min 45 s, so 30 would stop it at the next few targets.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -50,16 +52,50 @@ jobs:
       - name: reconstruct the environment from the lock
         # --locked refuses to re-solve: a manifest that drifted from its lock fails here, on purpose.
         run: pixi install --locked
+      # Each lane's output is kept for the step that names a failed one where GitHub's API serves
+      # it; pipefail keeps the lane's exit code through the tee.
       - name: lint
-        run: pixi run --locked lint
+        id: lint
+        run: |
+          set -o pipefail
+          pixi run --locked lint 2>&1 | tee "$RUNNER_TEMP/lint.txt"
       - name: typecheck
-        run: pixi run --locked typecheck
+        id: typecheck
+        run: |
+          set -o pipefail
+          pixi run --locked typecheck 2>&1 | tee "$RUNNER_TEMP/typecheck.txt"
       - name: tests (typeguard enclave)
-        run: pixi run --locked test
+        id: test
+        run: |
+          set -o pipefail
+          pixi run --locked test 2>&1 | tee "$RUNNER_TEMP/test.txt"
       - name: boundary (the interface standard's rules)
-        run: pixi run --locked boundary
+        id: boundary
+        run: |
+          set -o pipefail
+          pixi run --locked boundary 2>&1 | tee "$RUNNER_TEMP/boundary.txt"
       - name: symbolic verification (CrossHair + Z3)
-        run: pixi run --locked symbolic
+        id: symbolic
+        run: |
+          set -o pipefail
+          pixi run --locked symbolic 2>&1 | tee "$RUNNER_TEMP/symbolic.txt"
+      - name: name the failed lane
+        # A check's annotations are served to anyone who can read it, where the log sits behind a
+        # second download (tools/name_failures.sh says which lines and why).
+        if: failure()
+        env:
+          LINT: ${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          BOUNDARY: ${{ steps.boundary.outcome }}
+          SYMBOLIC: ${{ steps.symbolic.outcome }}
+        run: |
+          for lane in lint typecheck test boundary symbolic; do
+            outcome=${lane^^}
+            if [ "${!outcome}" = failure ]; then
+              bash tools/name_failures.sh "$lane" "$RUNNER_TEMP/$lane.txt"
+            fi
+          done
       - name: shell syntax of the kit
         # One file per call: bash -n parses its first operand only and makes the rest positional
         # parameters, so one call over both files checked the hook alone (measured 2026-10-04).
@@ -138,6 +174,18 @@ jobs:
           echo "the new code starts from: $base"
       - name: the evidence report
         run: pixi run --locked report --base "$BASE"
+      - name: name the failed lanes
+        # GitHub's API serves a job's annotations to anyone who can read the check, where the log
+        # and the artifact sit behind a second download; so each failed lane is named here, read
+        # from the report itself (tools/name_failures.sh says which lines and why).
+        if: failure()
+        run: |
+          set -euo pipefail
+          [ -f report/report.json ] || { echo "::error title=report::no report.json was written"; exit 0; }
+          jq -r '.lanes[] | select(.exit != 0) | [.task, (.exit | tostring), .output] | @tsv' report/report.json |
+            while IFS=$'\t' read -r task code file; do
+              bash tools/name_failures.sh "report lane ${task} exited ${code}" "report/$file"
+            done
       - name: keep the report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

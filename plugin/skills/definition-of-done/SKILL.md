@@ -120,9 +120,12 @@ per_condition_timeout = 20          # seconds per condition, 1 to 600: the decla
   `per_condition_timeout`; nobody passes a timeout by hand. It refuses, with exit 2 and having
   checked nothing, a module that is not part of the package, lies outside it or is exempt.
 - A scratch copy outside the package (the check that the contracts can fail) is not a module the
-  gate checks, so CrossHair runs on it directly, at the same declared bound: `pixi run --locked
-  python -m crosshair check <the copy> --analysis_kind=icontract --per_condition_timeout=<N>`, N the
-  `per_condition_timeout` under `[tool.beethoven-qa]`, never another number.
+  gate checks, so CrossHair runs on it directly, at the same declared bound and the way the gate
+  starts it: `pixi run --locked python -m beethoven_qa._crosshair check <the copy>
+  --analysis_kind=icontract --per_condition_timeout=<N> --report_all`, N the
+  `per_condition_timeout` under `[tool.beethoven-qa]`, never another number. The runner is
+  CrossHair's own command line with icontract's bookkeeping made first; `python -m crosshair`
+  alone crashes with a RecursionError in code that calls a contracted function many times.
 
 What the lines mean (CrossHair 0.0.111, measured 2026-10-04):
 

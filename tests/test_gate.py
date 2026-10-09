@@ -71,7 +71,7 @@ def test_uncontracted_counts_a_function_in_its_own_module_only() -> None:
 
 def test_crosshair_command_applies_the_declared_bound() -> None:
     cmd = crosshair_command("/usr/bin/python3", "/repo/src/pkg", 7)
-    assert cmd[:4] == ["/usr/bin/python3", "-m", "crosshair", "check"]
+    assert cmd[:4] == ["/usr/bin/python3", "-m", "beethoven_qa._crosshair", "check"]
     assert "--analysis_kind=icontract" in cmd
     assert "--per_condition_timeout=7" in cmd
     # Every run, not only on request: a verdict nobody saw was a pass nobody earned.
@@ -227,6 +227,31 @@ def test_gate_passes_a_proven_module_and_fails_a_false_one(tmp_path: Path) -> No
     result = _gate(_repo(tmp_path / "bad", bad))
     assert result.returncode != 0, result.stdout + result.stderr
     assert "double" in result.stdout + result.stderr
+
+
+def test_gate_proves_a_function_that_calls_a_contracted_one_many_times(tmp_path: Path) -> None:
+    # icontract's bookkeeping, made inside CrossHair's first path, grew a frame deeper with every
+    # contracted call until RecursionError (beethoven_qa._crosshair says how): 500 calls on one
+    # path were enough, and this toy failed so before the gate made the set first.
+    nested = """
+        from beethoven_qa.contracts import ensure, require
+
+        @require(lambda x: x >= 0)
+        def one(x: int) -> int:
+            return x
+
+        @require(lambda n: 0 <= n <= 10)
+        @ensure(lambda result, n: result == n + 500)
+        def many(n: int) -> int:
+            total = 0
+            for _ in range(500):
+                total += one(1)
+            return n + total
+    """
+    result = _gate(_repo(tmp_path, nested))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RecursionError" not in result.stdout + result.stderr
+    assert "info: Confirmed over all paths." in result.stdout, result.stdout
 
 
 def _toy(tmp_path: Path, files: dict[str, str], exempt: str = '["toy"]', extra: str = "") -> Path:

@@ -38,7 +38,8 @@ python_version = "3.11"
 mypy_path = "src"
 packages = ["beethoven_qa"]
 strict = true
-# icontract and beartype ship their own types; crosshair is a dev tool, never imported by the package.
+# icontract and beartype ship their own types; crosshair is a dev tool, imported by the package only
+# where _crosshair.py starts it for the gate.
 warn_unused_ignores = true
 
 # The gate's settings for this repository (`python -m beethoven_qa gate` reads them). Every

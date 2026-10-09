@@ -177,6 +177,10 @@ def uncontracted(entries: tuple[FunctionEntry, ...], exempt: frozenset[str]) -> 
 @require(lambda target: len(target) > 0, "the package directory to check")
 @require(lambda target: not target.startswith("-"), "a target, never an option")
 @ensure(lambda result, python: result[0] == python, "CrossHair runs under the given interpreter")
+@ensure(
+    lambda result: result[1:3] == ["-m", "beethoven_qa._crosshair"],
+    "through the runner that makes icontract's bookkeeping before CrossHair traces anything",
+)
 @ensure(lambda result: "--analysis_kind=icontract" in result, "the icontract contracts are checked")
 @ensure(
     lambda result, timeout: f"--per_condition_timeout={timeout}" in result,
@@ -189,11 +193,12 @@ def crosshair_command(python: str, target: str, timeout: int) -> list[str]:
     module or a directory) within ``timeout`` seconds per condition, and says what it found of
     every condition: without ``--report_all`` CrossHair prints a counterexample and nothing else,
     so a precondition no input meets, and a search that ran to its bound, looked like a proof.
+    CrossHair starts through ``beethoven_qa._crosshair``, which says why.
     """
     return [
         python,
         "-m",
-        "crosshair",
+        "beethoven_qa._crosshair",
         "check",
         target,
         "--analysis_kind=icontract",
