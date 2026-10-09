@@ -178,7 +178,9 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   and assumes its contracts there, so such a caller does the I/O too and is itself private, exempt
   or listed, and a listed function's contracts are checked by the tests alone),
   one process per target, as many at a time as the allocation has cores (`BEETHOVEN_QA_JOBS` can
-  lower it, never raise it), each condition bounded by `per_condition_timeout`. `--module` limits
+  lower it, never raise it), each condition bounded by `per_condition_timeout`, each process
+  started through `python -m beethoven_qa._crosshair`, which makes icontract's bookkeeping set
+  before CrossHair traces anything (Measured, 2026-10-09). `--module` limits
   both checks to one module (an entry of a deeper module stays that module's, imported or not).
   Every run prints every condition's verdict, counts them under each target (`gate: <target>: <c>
   confirmed over all paths, <n> not confirmed within <T> s, <u> unable to meet a precondition`,
@@ -260,8 +262,9 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   involved and what the report does not show. Exit 0, 1 (a lane failed; the report still
   written) or 2 (cannot run). `pixi run --locked report`; CI's job `report (evidence)` keeps the
   folder as an artifact, names each failed lane as an annotation of the check (the API serves
-  those where the log needs a second download; the gate job's symbolic lane names each failed
-  CrossHair target the same way, `tools/name_failures.sh`), and is not a required check.
+  those where the log needs a second download; the gate job names each of its own failed lanes
+  the same way, every failed CrossHair target with its error lines, `tools/name_failures.sh`),
+  and is not a required check.
 - `interface/` (from 2.0.0): this repository's manifest under that standard, `INTERFACE.json`, with
   `python.json` (the modules and names a consumer may import: `beethoven_qa.contracts` and
   `__version__`, nothing else) and `cli.json` (the seven commands, their options and exit codes,
@@ -412,6 +415,25 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   the names after a colon, so one named that way spelled the other ending. The row now ends with
   a fixed phrase either way, and the five conditions come back not confirmed at the bound with no
   counterexample. A contract over joined strings pins an ending the inputs cannot spell.
+- A crash of the tools' own making (2026-10-09, this cloud session, 4 cores; CrossHair 0.0.111,
+  icontract 2.7.3). On GitHub's runner the gate job's symbolic lane failed on 6c3c772 and the
+  report job's same lane passed on 460c694, with no target named (the log sits behind a download
+  this session cannot reach). Every target run again at twice the bound, 40 s, failed one:
+  `gate.uncontracted`, with `RecursionError: maximum recursion depth exceeded in comparison`
+  raised in icontract's wrapper of `is_public`, which it calls once per entry. icontract makes
+  the set of functions whose contracts it is checking on its first contracted call and keeps it
+  in a ContextVar; under CrossHair that call is made inside an explored path, where CrossHair's
+  own `set()` stands in for the builtin, and the set outlives the path, one layer deeper with
+  every addition and removal, so the process crashes after about 480 contracted calls in all,
+  sooner the more paths the bound allows. A contracted function that calls another 500 times
+  crashes so on its first path. The gate now starts CrossHair through `beethoven_qa._crosshair`,
+  which makes the set first; the toy and `uncontracted` at 40 s pass (`tests/test_gate.py`,
+  `tests/test_crosshair_runner.py`), and what CrossHair checks is unchanged. Two things learnt on
+  the way: importing CrossHair turns icontract's own checks off in the whole process (its
+  `core_and_libs` replaces the three assertion functions), so the runner imports it only when it
+  starts it, and a test asserts a process that imports the runner keeps its contracts; and that
+  this crash was what the runner hit is inferred, not shown, so the gate job now names each
+  failed lane where GitHub's API serves it.
 
 ## Build and test
 
@@ -441,13 +463,15 @@ tree with uncommitted or untracked files: commit everything first.
 - `src/beethoven_qa/` — `contracts.py`, `gate.py`, `vendor.py`, `boundary.py`, `example.py`,
   `__main__.py` (the command line; exempt from the contract rule as wiring and I/O), `standards/`
   (one module per group; `findings.py`, `newcode.py`, `sarif.py` and `group.py` shared; `run.py`
-  the runner), `report.py` (the evidence report, `docs/REPORT.md`).
+  the runner), `report.py` (the evidence report, `docs/REPORT.md`), `_crosshair.py` (what the
+  gate starts CrossHair through).
 - `tests/` — pytest under typeguard's import hook; `test_hooks.py` runs the kit's real pre-push
-  hook with a stub pixi, a bare remote and a linked worktree.
+  hook with a stub pixi, a bare remote and a linked worktree; `test_crosshair_runner.py` the
+  runner.
 - `plugin/` — the Claude Code plugin (`hooks/` holds the coaching hook); `.claude-plugin/marketplace.json` — the marketplace listing it.
 - `tools/name_failures.sh` — CI's account of a failed lane in the check's annotations (each failed
   CrossHair target with its error lines, what the gate refused, the runner);
-  `tests/test_name_failures.py` runs it, and the two steps around it, on a lane's output.
+  `tests/test_name_failures.py` runs it, and the steps that call it, on a lane's output.
 - `tools/check_workflows.mjs` — CI's check of the workflow scripts against the runtime's rules
   (the meta literal and what follows it, the clock and randomness with every `\u` escape refused,
   module loading, `new.target`, both grammars); `tools/check_workflows.test.mjs` — its tests, and

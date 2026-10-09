@@ -171,3 +171,7 @@ makes it (`--base HEAD^1`), in a cloud session with 4 cores: every lane passed, 
   the lines of its output that say why and its last lines, and for the symbolic lane each failed
   CrossHair target with its error lines (the step `name the failed lanes` in `ci.yml`, running
   `tools/name_failures.sh`), so the next failure says itself to anyone who can read the check.
+  One cause that fits is found and fixed: CrossHair crashed with a RecursionError of its own
+  making in a target that calls a contracted function many times, sooner the more paths its
+  bound let it explore (CLAUDE.md, "Measured", 2026-10-09); that it is the runner's cause is
+  inferred, not shown.

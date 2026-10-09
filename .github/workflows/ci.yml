@@ -52,26 +52,50 @@ jobs:
       - name: reconstruct the environment from the lock
         # --locked refuses to re-solve: a manifest that drifted from its lock fails here, on purpose.
         run: pixi install --locked
+      # Each lane's output is kept for the step that names a failed one where GitHub's API serves
+      # it; pipefail keeps the lane's exit code through the tee.
       - name: lint
-        run: pixi run --locked lint
+        id: lint
+        run: |
+          set -o pipefail
+          pixi run --locked lint 2>&1 | tee "$RUNNER_TEMP/lint.txt"
       - name: typecheck
-        run: pixi run --locked typecheck
+        id: typecheck
+        run: |
+          set -o pipefail
+          pixi run --locked typecheck 2>&1 | tee "$RUNNER_TEMP/typecheck.txt"
       - name: tests (typeguard enclave)
-        run: pixi run --locked test
+        id: test
+        run: |
+          set -o pipefail
+          pixi run --locked test 2>&1 | tee "$RUNNER_TEMP/test.txt"
       - name: boundary (the interface standard's rules)
-        run: pixi run --locked boundary
+        id: boundary
+        run: |
+          set -o pipefail
+          pixi run --locked boundary 2>&1 | tee "$RUNNER_TEMP/boundary.txt"
       - name: symbolic verification (CrossHair + Z3)
         id: symbolic
-        # The output is kept for the step after, which names what failed where GitHub's API
-        # serves it; pipefail keeps the gate's exit code through the tee.
         run: |
           set -o pipefail
           pixi run --locked symbolic 2>&1 | tee "$RUNNER_TEMP/symbolic.txt"
-      - name: name what the symbolic lane refused
+      - name: name the failed lane
         # A check's annotations are served to anyone who can read it, where the log sits behind a
         # second download (tools/name_failures.sh says which lines and why).
-        if: failure() && steps.symbolic.outcome == 'failure'
-        run: bash tools/name_failures.sh symbolic "$RUNNER_TEMP/symbolic.txt"
+        if: failure()
+        env:
+          LINT: ${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          BOUNDARY: ${{ steps.boundary.outcome }}
+          SYMBOLIC: ${{ steps.symbolic.outcome }}
+        run: |
+          for lane in lint typecheck test boundary symbolic; do
+            outcome=${lane^^}
+            if [ "${!outcome}" = failure ]; then
+              bash tools/name_failures.sh "$lane" "$RUNNER_TEMP/$lane.txt"
+            fi
+          done
       - name: shell syntax of the kit
         # One file per call: bash -n parses its first operand only and makes the rest positional
         # parameters, so one call over both files checked the hook alone (measured 2026-10-04).

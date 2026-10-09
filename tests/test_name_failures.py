@@ -147,12 +147,21 @@ def test_a_lane_that_printed_nothing_is_named_too(tmp_path: Path) -> None:
         assert message.startswith("the lane printed nothing")
 
 
-def _stub_pixi(bin_dir: Path, output: str, code: int) -> None:
-    # Stands in for `pixi run --locked symbolic`: prints the gate's output and exits as it did.
+LANES = (
+    ("lint", "lint"),
+    ("typecheck", "typecheck"),
+    ("tests (typeguard enclave)", "test"),
+    ("boundary (the interface standard's rules)", "boundary"),
+    ("symbolic verification (CrossHair + Z3)", "symbolic"),
+)
+
+
+def _stub_pixi(bin_dir: Path) -> None:
+    # Stands in for `pixi run --locked <task>`: prints what the task's file holds and exits with
+    # the code STUB_CODE names, as the lane did.
     bin_dir.mkdir()
-    (bin_dir / "out.txt").write_text(output)
     pixi = bin_dir / "pixi"
-    pixi.write_text(f"#!/bin/bash\ncat '{bin_dir / 'out.txt'}'\nexit {code}\n")
+    pixi.write_text(f'#!/bin/bash\ncat "{bin_dir}/$3.out"\nexit "$STUB_CODE"\n')
     pixi.chmod(0o755)
 
 
@@ -167,27 +176,42 @@ def _run_step(name: str, cwd: Path, env: dict[str, str]) -> subprocess.Completed
     )
 
 
-def test_the_gate_job_keeps_the_symbolic_exit_and_names_what_failed(tmp_path: Path) -> None:
-    for code in (0, 1):
-        work = tmp_path / str(code)
-        work.mkdir()
-        _stub_pixi(work / "bin", GATE_OUTPUT, code)
-        env = {
-            **os.environ,
-            "PATH": f"{work / 'bin'}{os.pathsep}{os.environ['PATH']}",
-            "RUNNER_TEMP": str(work),
-        }
-        ran = _run_step("symbolic verification (CrossHair + Z3)", REPO, env)
-        # The tee in between never turns a failed gate green, nor a green one red.
-        assert ran.returncode == code, ran.stderr
-        assert (work / "symbolic.txt").read_text() == GATE_OUTPUT
-    named = _run_step("name what the symbolic lane refused", REPO, env)
+def test_each_gate_lane_keeps_its_exit_code_and_its_output(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    _stub_pixi(bin_dir)
+    for step, lane in LANES:
+        (bin_dir / f"{lane}.out").write_text(f"what {lane} printed\n")
+        for code in ("0", "1"):
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "RUNNER_TEMP": str(tmp_path),
+                "STUB_CODE": code,
+            }
+            ran = _run_step(step, REPO, env)
+            # The tee in between never turns a failed lane green, nor a green one red.
+            assert str(ran.returncode) == code, (step, ran.stderr)
+            assert (tmp_path / f"{lane}.txt").read_text() == f"what {lane} printed\n"
+
+
+def test_the_gate_job_names_each_failed_lane_and_no_other(tmp_path: Path) -> None:
+    (tmp_path / "test.txt").write_text("..F\nFAILED tests/test_x.py::test_y - AssertionError\n")
+    (tmp_path / "symbolic.txt").write_text(GATE_OUTPUT)
+    (tmp_path / "lint.txt").write_text("All checks passed!\n")
+    outcomes = {"LINT": "success", "TYPECHECK": "success", "TEST": "failure"}
+    outcomes |= {"BOUNDARY": "skipped", "SYMBOLIC": "failure"}
+    env = {**os.environ, "RUNNER_TEMP": str(tmp_path), **outcomes}
+    named = _run_step("name the failed lane", REPO, env)
     assert named.returncode == 0, named.stderr
-    assert [m.splitlines()[0] for _, m in _commands(named.stdout)[:2]] == [
-        "gate: p.b: exit 1",
-        "gate: p.c: exit 1",
-    ]
-    assert "if: failure() && steps.symbolic.outcome == 'failure'" in CI.read_text()
+    found = _commands(named.stdout)
+    assert [title for title, _ in found] == ["test"] + ["symbolic"] * 3
+    assert "FAILED tests/test_x.py::test_y - AssertionError" in found[0][1].splitlines()
+    assert found[1][1].splitlines()[0] == "gate: p.b: exit 1"
+    # Every lane's step keeps its output where this step reads it, by the same name.
+    text = CI.read_text()
+    for _, lane in LANES:
+        assert f'"$RUNNER_TEMP/{lane}.txt"' in text
+        assert f"{lane.upper()}: ${{{{ steps.{lane}.outcome }}}}" in text
 
 
 def test_the_report_job_names_each_failed_lane(tmp_path: Path) -> None:
