@@ -375,7 +375,7 @@ that states the function's real domain, which no caller ever leaves, is not dodg
 - The code standards (2026-10-05): what was measured while building them, the tools' behaviour
   without the flags that disable a repository's suppressions among it, is under "Measured" in
   `docs/STANDARDS.md`. The symbolic gate went from 10 targets in about 2 minutes to 32 in about 7
-  on 4 cores, to 41 by 2026-10-08 and to 55 with 5.0.0 (below).
+  on 4 cores, to 41 by 2026-10-08 and to 56 with 5.0.0 (below).
 
 - Every verdict, every run (2026-10-08, this cloud session, 4 cores; CrossHair 0.0.111). Until this
   change the plain gate, the one the pre-push hook and CI run, started CrossHair without
@@ -393,9 +393,9 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   the package-wide gate (`pixi run --locked symbolic`) reported, on the stream's tree of 41
   targets, `gate: conditions: 11 of 121 confirmed over all paths, 110 not confirmed within 20 s
   per condition, 0 unable to meet a precondition` in 11 min 57 s wall time on 4 cores shared with
-  two other sessions' test runs, and on 5.0.0's merged tree of 55 targets `13 of 164 confirmed
-  over all paths, 151 not confirmed within 20 s per condition, 0 unable to meet a precondition`
-  in 13 min 54 s (the evidence report's own symbolic lane, made at 4195453); the module gate on
+  two other sessions' test runs, and on 5.0.0's tree of 56 targets `13 of 165 confirmed
+  over all paths, 152 not confirmed within 20 s per condition, 0 unable to meet a precondition`
+  in 14 min 3 s (measured at 89a3da8); the module gate on
   `beethoven_qa.gate` (6 targets, `verdicts` among them) 1 of 21
   confirmed over all paths (`is_public`), 20 not confirmed at the bound, every one of them over
   strings or tuples, no counterexample, in 2 min 6 s. The suppression check, run on
@@ -403,6 +403,12 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   on deliberate wrong calls and on a SARIF log indexed as an untyped mapping, one `noqa` on a
   bound lambda for a rule the ruff configuration ignores anyway), and nothing in the package;
   each went by typing the wrong value `Any`, reading the log back as JSON, or writing a `def`.
+- The gate refused its own branch once more before the pull request (2026-10-08, fixed in
+  89a3da8): `report.deciders` promised that the merge row ends with `; no person` exactly when
+  the ruleset names no bypass, and CrossHair built a bypass named `; no person`; the row joined
+  the names after a colon, so one named that way spelled the other ending. The row now ends with
+  a fixed phrase either way, and the five conditions come back not confirmed at the bound with no
+  counterexample. A contract over joined strings pins an ending the inputs cannot spell.
 
 ## Build and test
 

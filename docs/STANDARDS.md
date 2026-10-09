@@ -219,8 +219,8 @@ bandit 1.9.4, coverage.py 7.16.2, ruff 0.16.10, CrossHair 0.0.111, git 2.43.
   `--report-all` showed them, and 107 of 117 conditions were at the bound): `gate: conditions: 11
   of 121 confirmed over all paths, 110 not confirmed within 20 s per condition, 0 unable to meet a
   precondition`, in 11 min 57 s wall time on 4 cores shared with two other sessions' test runs,
-  and on 5.0.0's merged tree of 55 targets `13 of 164 confirmed over all paths, 151 not confirmed
-  within 20 s per condition, 0 unable to meet a precondition` in 13 min 54 s;
+  and on 5.0.0's tree of 56 targets `13 of 165 confirmed over all paths, 152 not confirmed
+  within 20 s per condition, 0 unable to meet a precondition` in 14 min 3 s (measured at 89a3da8);
   `security.level_for`, the one target whose precondition no input could meet, proves over all
   paths now that its grades are an enum (CLAUDE.md, "Measured").
 - Two functions were broken on purpose before their contracts were trusted. `classify` marking an
