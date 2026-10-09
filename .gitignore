@@ -1,4 +1,7 @@
-# Pixi's solved environment: reconstructable from pixi.lock, never committed.
+# Pixi's solved environment: reconstructable from pixi.lock, never committed; nor a link to the
+# main checkout's, which a build stream's worktree carries in its place (a link is no directory
+# to git, so the slashed form alone would list it as untracked and the pre-push hook would refuse).
+.pixi
 .pixi/
 
 # Python
@@ -16,6 +19,10 @@ __pycache__/
 .env
 .env.*
 *.pem
+
+# The evidence report's default directory (python -m beethoven_qa report); it is handed over, never
+# committed, and an untracked folder would make the pre-push hook refuse the next push.
+report/
 
 # Worktrees Claude Code creates for parallel sessions and isolated subagents.
 .claude/worktrees/

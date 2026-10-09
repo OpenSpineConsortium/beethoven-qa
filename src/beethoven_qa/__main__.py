@@ -1,10 +1,10 @@
 """The command line: ``python -m beethoven_qa gate | standards | coach | vendor | vendor-check |
-boundary``.
+boundary | report``.
 
 Wiring and I/O only, so the gate exempts this module from the contract rule (pyproject.toml); the
 logic it calls lives in contracted, symbolically checked functions of gate.py, vendor.py,
-boundary.py and the standards groups. What a consumer may type is interface/cli.json, the cli
-export; tests/test_interface.py holds this parser to it.
+boundary.py, report.py and the standards groups. What a consumer may type is interface/cli.json,
+the cli export; tests/test_interface.py holds this parser to it.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from beethoven_qa import __version__, boundary, gate, vendor
+from beethoven_qa import __version__, boundary, gate, report, vendor
 from beethoven_qa.standards import coach
 from beethoven_qa.standards import run as standards
 
@@ -42,7 +42,8 @@ def _gate_parser(g: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--report-all",
         action="store_true",
-        help="print every condition's verdict; a precondition no input can meet fails the gate",
+        help="accepted and without effect: every run prints every condition's verdict and fails "
+        "on a precondition no input can meet",
     )
 
 
@@ -88,6 +89,32 @@ def _boundary_parser(b: argparse.ArgumentParser) -> None:
     b.add_argument("--root", type=Path, default=Path("."), help="repository root (default: .)")
 
 
+def _report_parser(r: argparse.ArgumentParser) -> None:
+    r.add_argument("--root", type=Path, default=Path("."), help="repository root (default: .)")
+    r.add_argument(
+        "--out",
+        type=Path,
+        default=Path("report"),
+        help="where report.md, report.json, every lane's output and the SARIF logs are written "
+        "(default: ./report); refused unless empty or not there yet",
+    )
+    r.add_argument(
+        "--base",
+        metavar="REF",
+        default=None,
+        help="the commit the new code starts from, handed to the standards lane as its --base "
+        "(default: the lane's own, auto: the merge base with origin/main)",
+    )
+    r.add_argument(
+        "--timeout",
+        type=int,
+        default=3600,
+        metavar="SECONDS",
+        help="how long one lane may run before it is stopped and recorded as exit 124 "
+        "(default: 3600)",
+    )
+
+
 # Each command, its help line and what adds its arguments, in the order --help lists them.
 _COMMANDS: tuple[tuple[str, str, Callable[[argparse.ArgumentParser], None]], ...] = (
     (
@@ -118,6 +145,12 @@ _COMMANDS: tuple[tuple[str, str, Callable[[argparse.ArgumentParser], None]], ...
         "published surface, the direction",
         _boundary_parser,
     ),
+    (
+        "report",
+        "the evidence report: every lane of the gate run as its own process and written up, with "
+        "who decided each verdict, for anyone who doubts code written by an AI",
+        _report_parser,
+    ),
 )
 
 
@@ -130,7 +163,8 @@ def _gate(args: argparse.Namespace) -> int:
     if args.module is not None and not args.module.startswith(config.package):
         print(f"gate: {args.module} is not part of {config.package}")
         return 2
-    return gate._run(args.root.resolve(), args.module, args.report_all)
+    # --report-all is accepted for the workflow scripts that pass it; it is the default.
+    return gate._run(args.root.resolve(), args.module)
 
 
 def _standards(args: argparse.Namespace) -> int:
@@ -163,6 +197,8 @@ def main(argv: list[str]) -> int:
         return _standards(args)
     if args.command == "coach":
         return _coach(args)
+    if args.command == "report":
+        return report._run(args.root, args.out, report._Options(args.base, args.timeout))
     try:
         return _GIT_COMMANDS[args.command](args)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:

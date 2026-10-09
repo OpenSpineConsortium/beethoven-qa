@@ -8,7 +8,9 @@ checks, so "the gate is green" is shown to mean something.
 
 from __future__ import annotations
 
+import ast
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -17,18 +19,27 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from beethoven_qa import gate
 from beethoven_qa.contracts import ViolationError
 from beethoven_qa.gate import (
     FunctionEntry,
     GateConfig,
+    Verdicts,
     crosshair_command,
     is_dotted_identifier,
     is_public,
     set_aside,
     uncontracted,
+    verdicts,
 )
 
 SRC = Path(__file__).resolve().parent.parent / "src"
+
+# The gate's last line before its verdict, as the report command reads it: byte for byte.
+CONDITIONS = re.compile(
+    r"^gate: conditions: (\d+) of (\d+) confirmed over all paths, (\d+) not confirmed within "
+    r"(\d+) s per condition, (\d+) unable to meet a precondition$"
+)
 
 
 def test_is_public() -> None:
@@ -63,14 +74,65 @@ def test_crosshair_command_applies_the_declared_bound() -> None:
     assert cmd[:4] == ["/usr/bin/python3", "-m", "crosshair", "check"]
     assert "--analysis_kind=icontract" in cmd
     assert "--per_condition_timeout=7" in cmd
-    assert "--report_all" not in cmd
-    assert (
-        crosshair_command("/usr/bin/python3", "pkg.mod", 7, report_all=True)[-1] == "--report_all"
-    )
+    # Every run, not only on request: a verdict nobody saw was a pass nobody earned.
+    assert cmd[-1] == "--report_all"
     with pytest.raises(ViolationError):
         crosshair_command("/usr/bin/python3", "/repo/src/pkg", 0)
     with pytest.raises(ViolationError):  # found by the gate on its own first draft of the flag
         crosshair_command("/usr/bin/python3", "--report_all", 1)
+
+
+def test_verdicts_count_crosshair_lines_and_nothing_else() -> None:
+    text = (
+        "/r/a.py:3: info: Confirmed over all paths.\n"
+        "/r/a.py:5: info: Not confirmed.\n"
+        "/r/a.py:7: info: Confirmed over all paths.\n"
+        "/r/b.py:9: info: Unable to meet precondition.\n"
+        "/r/b.py:12: error: false when calling f(1) (which returns 2)\n"
+        "a checked function printed: Confirmed over all paths.\n"
+        "/r/b.py:14: info: Not confirmed. (then more)\n"
+        # CrossHair's own form when the precondition raised: the reason follows, and ends the line.
+        '/r/c.py:4: info: Unable to meet precondition (possibly because it raised "KeyError(1)" '
+        'at   File "/r/c.py", line 3, in <lambda>?).\n'
+    )
+    assert verdicts(text) == Verdicts(2, 1, 2)
+    assert verdicts("") == Verdicts(0, 0, 0)
+    assert verdicts("Traceback (most recent call last):\n  File x\nTypeError: y\n") == Verdicts(
+        0, 0, 0
+    )
+
+
+def test_report_counts_each_target_and_names_what_the_gate_refuses(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # One CrossHair process per target: the first non-zero exit is the gate's, the counts add up
+    # over every target, and what no exit code says (nothing checkable, a precondition no input
+    # meets) is named for the gate to refuse. Every process's output is printed under its line.
+    def ran(code: int, out: str, err: str = "") -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["crosshair"], code, out, err)
+
+    results = [
+        ran(0, "/r/a.py:3: info: Confirmed over all paths.\n/r/a.py:5: info: Not confirmed.\n"),
+        ran(1, "/r/b.py:9: error: false when calling f(1) (which returns 2)\n"),
+        ran(0, "", f"{gate._NOTHING_TO_CHECK}\n"),
+        ran(0, "/r/d.py:2: info: Unable to meet precondition.\n"),
+        ran(2, "", "Traceback (most recent call last):\n  File x\nTypeError: y\n"),
+    ]
+    targets = ["pkg.a", "pkg.b", "pkg.c", "pkg.d", "pkg.e"]
+    failed, totals, problems = gate._report(targets, results, 20)
+    assert failed == 1 and totals == Verdicts(1, 1, 1)
+    assert problems == [
+        "CrossHair found nothing to check in pkg.c, which has contracts",
+        f"pkg.d: {gate._VACUOUS}",
+    ]
+    out = capsys.readouterr().out.splitlines()
+    assert out[:2] == [
+        "gate: pkg.a: exit 0",
+        "gate: pkg.a: 1 confirmed over all paths, 1 not confirmed within 20 s, "
+        "0 unable to meet a precondition",
+    ]
+    assert "/r/b.py:9: error: false when calling f(1) (which returns 2)" in out
+    assert "gate: pkg.e: exit 2" in out and out.count("TypeError: y") == 1
 
 
 def test_set_aside() -> None:
@@ -155,7 +217,10 @@ def test_gate_passes_a_proven_module_and_fails_a_false_one(tmp_path: Path) -> No
     """
     result = _gate(_repo(tmp_path / "good", good))
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "no counterexample" in result.stdout
+    lines = result.stdout.splitlines()
+    assert lines[-1] == "gate: no counterexample within 3 s per condition"
+    match = CONDITIONS.match(lines[-2])  # the counts: the last line before the verdict
+    assert match and match.groups() == ("1", "1", "0", "3", "0"), lines[-2]
 
     # The same function with a postcondition that is false for x > 0: CrossHair must find it.
     bad = good.replace("result >= x", "result == x")
@@ -284,94 +349,335 @@ def test_gate_runs_crosshair_even_when_a_function_lacks_contracts(tmp_path: Path
     assert "toy.other.bare" in result.stdout and "false when calling double" in result.stdout
 
 
-def test_gate_one_module_and_every_verdict(tmp_path: Path) -> None:
-    vacuous = """
-        from beethoven_qa.contracts import ensure, require
+NEVER = """
+    from beethoven_qa.contracts import ensure, require
 
-        @require(lambda x: x > 0 and x < 0)
-        @ensure(lambda result: result > 0)
-        def never(x: int) -> int:
-            return x
-    """
+    @require(lambda x: x > 0 and x < 0)
+    @ensure(lambda result: result > 0)
+    def never(x: int) -> int:
+        return x
+"""
+
+# A loop to a symbolic count: no counterexample and no proof within the bound.
+SEARCHED = """
+    from beethoven_qa.contracts import ensure
+
+    @ensure(lambda result, n: result >= 0)
+    def tri(n: int) -> int:
+        return sum(i for i in range(n))
+"""
+
+
+def test_gate_one_module(tmp_path: Path) -> None:
     root = _toy(
         tmp_path,
         {
             "__init__.py": "",
             "logic.py": PROVEN,
-            "empty.py": vacuous,
+            "empty.py": NEVER,
             "other.py": "def bare() -> None:\n    pass\n",
             "broken.py": "1 / 0\n",
         },
     )
-    one = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "beethoven_qa",
-            "gate",
-            "--root",
-            str(root),
-            "--module",
-            "toy.logic",
-        ],
-        cwd=root,
-        env={"PYTHONPATH": str(SRC), "PATH": "/usr/bin:/bin"},
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=600,
-    )
+    one = _gate(root, "--module", "toy.logic")
     assert one.returncode == 0, one.stdout + one.stderr  # toy.other's bare function is not in scope
-
-    def report_all(module: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "beethoven_qa",
-                "gate",
-                "--root",
-                str(root),
-                "--module",
-                module,
-                "--report-all",
-            ],
-            cwd=root,
-            env={"PYTHONPATH": str(SRC), "PATH": "/usr/bin:/bin"},
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=600,
-        )
-
-    proven = report_all("toy.logic")
-    assert proven.returncode == 0 and "Confirmed over all paths" in proven.stdout, proven.stdout
-    never = report_all("toy.empty")
+    assert "info: Confirmed over all paths." in one.stdout, one.stdout
+    never = _gate(root, "--module", "toy.empty")
     assert never.returncode != 0 and "vacuous" in never.stdout, never.stdout
+    # --report-all is accepted and changes nothing: every run already reports every verdict.
+    assert _gate(root, "--module", "toy.empty", "--report-all").stdout == never.stdout
 
     # exempt, missing, another package, an import that fails
     for outside in ("toy", "toy.nope", "other.logic", "toy.broken"):
-        refused = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "beethoven_qa",
-                "gate",
-                "--root",
-                str(root),
-                "--module",
-                outside,
-            ],
-            cwd=root,
-            env={"PYTHONPATH": str(SRC), "PATH": "/usr/bin:/bin"},
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=600,
-        )
+        refused = _gate(root, "--module", outside)
         assert refused.returncode == 2, (outside, refused.stdout + refused.stderr)
         if outside == "toy.broken":  # and the reason, not only the refusal
             assert "ZeroDivisionError" in refused.stdout, refused.stdout
+
+
+def _counted(target: str, confirmed: int, unconfirmed: int, unmet: int) -> str:
+    return (
+        f"gate: {target}: {confirmed} confirmed over all paths, {unconfirmed} not confirmed "
+        f"within 3 s, {unmet} unable to meet a precondition"
+    )
+
+
+def test_gate_counts_every_verdict_and_fails_a_precondition_no_input_meets(
+    tmp_path: Path,
+) -> None:
+    # With or without --report-all: each condition's verdict, the counts under each target right
+    # after its exit line, the counts over the run as the last line, and a precondition no input
+    # meets fails the gate. Before, only --report-all saw any verdict, and the plain gate the hook
+    # and CI ran passed such a function in silence.
+    files = {"__init__.py": "", "logic.py": PROVEN, "empty.py": NEVER, "loop.py": SEARCHED}
+    root = _toy(tmp_path, files)
+    for flags in ((), ("--report-all",)):
+        result = _gate(root, *flags)
+        assert result.returncode == 1, result.stdout + result.stderr
+        lines = result.stdout.splitlines()
+        assert lines.index("gate: toy.logic.double: exit 0") + 1 == lines.index(
+            _counted("toy.logic.double", 1, 0, 0)
+        )
+        assert _counted("toy.empty.never", 0, 0, 1) in lines
+        assert _counted("toy.loop.tri", 0, 1, 0) in lines
+        assert sum(1 for line in lines if line.endswith(": info: Not confirmed.")) == 1
+        assert "gate: toy.empty.never: a precondition no input can meet" in result.stdout
+        assert "vacuous" in result.stdout and "CrossHair cannot build" in result.stdout
+        match = CONDITIONS.match(lines[-1])
+        assert match and match.groups() == ("1", "3", "1", "3", "1"), lines[-1]
+
+
+# A test file carrying each way of keeping a test from running or from counting, as a decorator,
+# as a call, by the full name, through an alias and through a from-import; and one string that
+# only spells them, which is no finding.
+HIDDEN_TESTS = """\
+import unittest
+from unittest import expectedFailure
+
+import pytest
+from pytest import mark as m
+
+numpy = pytest.importorskip("numpy")
+
+
+@pytest.mark.skip(reason="later")
+def test_a() -> None:
+    pass
+
+
+@m.xfail
+def test_b() -> None:
+    pass
+
+
+@unittest.skipIf(True, "no")
+def test_c() -> None:
+    pass
+
+
+@expectedFailure
+def test_d() -> None:
+    pass
+
+
+def test_e() -> None:
+    pytest.skip("not here")
+
+
+def test_f() -> None:
+    text = "pytest.skip(x) @pytest.mark.skip # noqa # type: ignore # nosec"
+    assert text
+
+
+pytestmark = pytest.mark.skipif(False, reason="a mark bound to the module, no call, no decorator")
+
+
+@pytest.mark.parametrize("v", [pytest.param(1, marks=pytest.mark.xfail)])
+def test_g(v: int) -> None:
+    assert v
+
+
+class Case(unittest.TestCase):
+    def test_h(self) -> None:
+        self.skipTest("a method of the case, no import to resolve")
+
+    @unittest.skip("x")
+    def test_i(self) -> None:
+        pass
+
+    @unittest.skipUnless(False, "x")
+    def test_j(self) -> None:
+        pass
+
+
+def test_k() -> None:
+    raise unittest.SkipTest("raised, not called as a skip")
+
+
+def test_l() -> None:
+    pytest.xfail("x")
+"""
+
+# A module carrying each comment the standards' tools would read as a suppression, one string
+# that only spells two of them, and one comment that mentions the word without being one.
+COMMENTED = """\
+from beethoven_qa.contracts import ensure, require
+
+
+@require(lambda x: x >= 0)
+@ensure(lambda result, x: result >= x)
+def double(x: int) -> int:
+    return 2 * x
+
+
+a = 1  # noqa: E501
+b = 2  #type:ignore[assignment]
+c = 3  # nosec B101
+d = 4  # pragma: no cover
+# jscpd:ignore-start
+# zizmor: ignore[template-injection]
+# complexipy: ignore
+e = 5  # ruff: noqa
+f = 6  # mypy: ignore-errors
+# flake8: noqa
+# mypy: disable-error-code="assignment"
+# isort: skip_file
+# ruff: isort: skip_file
+# fmt: off
+#lizard forgive
+h = 7  # this comment says GENERATED CODE mid-sentence, and lizard would read no further
+i = 8  # lizard forgive, says this comment, and lizard forgives nothing for it
+g = "# noqa and # type: ignore in a string"
+# the standards ignore a noqa anyway, as this comment says without carrying one
+"""
+
+
+def _line(text: str, needle: str) -> int:
+    return next(n for n, line in enumerate(text.splitlines(), 1) if needle in line)
+
+
+def test_gate_refuses_suppressions_and_skipped_tests(tmp_path: Path) -> None:
+    root = _toy(tmp_path, {"__init__.py": "", "logic.py": COMMENTED})
+    (root / "tests").mkdir()
+    (root / "tests" / "test_hidden.py").write_text(HIDDEN_TESTS, encoding="utf-8")
+    # A consumer's pinned copy is never read by this check; vendor-check guards it.
+    copy = root / "vendor" / "beethoven-qa" / "src" / "beethoven_qa"
+    copy.mkdir(parents=True)
+    (copy / "x.py").write_text("import pytest\n\nx = 1  # noqa\npytest.skip('a')\n", "utf-8")
+    result = _gate(root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    out = result.stdout
+    why = "no comment sets a finding aside; fix what it hides"
+    for comment in (
+        "# noqa: E501",
+        "#type:ignore[assignment]",
+        "# nosec B101",
+        "# pragma: no cover",
+        "# jscpd:ignore-start",
+        "# zizmor: ignore[template-injection]",
+        "# complexipy: ignore",
+        "# ruff: noqa",
+        "# mypy: ignore-errors",
+        "# flake8: noqa",
+        '# mypy: disable-error-code="assignment"',
+        "# isort: skip_file",
+        "# ruff: isort: skip_file",
+        "# fmt: off",
+        "#lizard forgive",
+        "# this comment says GENERATED CODE mid-sentence, and lizard would read no further",
+    ):
+        line = _line(COMMENTED, comment)
+        assert f"gate: suppression src/toy/logic.py:{line}: {comment}: {why}" in out, out
+    assert "in a string" not in out and "without carrying one" not in out, out
+    assert "forgives nothing" not in out, out
+    for name, needle in (
+        ("pytest.importorskip", "importorskip"),
+        ("pytest.mark.skip", "@pytest.mark.skip"),
+        ("m.xfail", "@m.xfail"),
+        ("unittest.skipIf", "@unittest.skipIf"),
+        ("expectedFailure", "@expectedFailure"),
+        ("pytest.skip", "pytest.skip("),
+        ("pytest.mark.skipif", "pytestmark ="),
+        ("pytest.mark.xfail", "marks=pytest.mark.xfail"),
+        ("self.skipTest", "self.skipTest("),
+        ("unittest.skip", "@unittest.skip("),
+        ("unittest.skipUnless", "@unittest.skipUnless("),
+        ("unittest.SkipTest", "raise unittest.SkipTest("),
+        ("pytest.xfail", "pytest.xfail("),
+    ):
+        line = _line(HIDDEN_TESTS, needle)
+        assert f"gate: skip tests/test_hidden.py:{line}: {name}: a test is never skipped" in out
+    assert out.count("gate: skip ") == 13 and out.count("gate: suppression ") == 16, out
+    assert "vendor" not in out, out
+    assert "gate: instead of a suppression:" in out
+
+    # Under --module only that module's own file is read, never the tests directory.
+    root = _toy(tmp_path / "module", {"__init__.py": "", "logic.py": PROVEN})
+    (root / "tests").mkdir()
+    (root / "tests" / "test_hidden.py").write_text(HIDDEN_TESTS, encoding="utf-8")
+    alone = _gate(root, "--module", "toy.logic")
+    assert alone.returncode == 0 and "skip " not in alone.stdout, alone.stdout + alone.stderr
+    whole = _gate(root)
+    assert whole.returncode == 1 and whole.stdout.count("gate: skip ") == 13, whole.stdout
+
+
+def test_this_repository_hides_nothing() -> None:
+    # The gate's own package and tests carry no directive, no suppression comment and no skipped
+    # test: what the check refuses in a consumer, this repository is held to first.
+    config = GateConfig.from_pyproject(SRC.parent)
+    assert gate._hidden(gate._checked_files(SRC.parent, config, [], None), SRC.parent) == []
+
+
+def test_gate_refuses_a_stub_and_reads_where_pytest_collects(tmp_path: Path) -> None:
+    # A .pyi beside a module is what mypy checks in its place (measured: a module returning a str
+    # from an int function passed `mypy --strict` under a stub of the right signature), so the
+    # gate refuses it, under --module too. The skip check reads the directories
+    # [tool.pytest.ini_options].testpaths names and a conftest.py at the root, not "tests" by
+    # name, since pytest collects there.
+    root = _toy(
+        tmp_path,
+        {"__init__.py": "", "logic.py": PROVEN, "logic.pyi": "def double(x: int) -> int: ...\n"},
+        extra='\n[tool.pytest.ini_options]\ntestpaths = ["checks"]\n',
+    )
+    (root / "checks").mkdir()
+    (root / "checks" / "test_hidden.py").write_text(HIDDEN_TESTS, encoding="utf-8")
+    (root / "conftest.py").write_text(
+        "import pytest\n\n\ndef pytest_collection_modifyitems(items):\n"
+        "    for item in items:\n        item.add_marker(pytest.mark.skip)\n",
+        encoding="utf-8",
+    )
+    result = _gate(root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    out = result.stdout
+    assert f"gate: stub src/toy/logic.pyi: {gate._NO_STUB}" in out, out
+    assert out.count("gate: skip checks/test_hidden.py:") == 13, out
+    assert "gate: skip conftest.py:6: pytest.mark.skip: " in out, out
+    assert "gate: instead of a suppression:" in out
+    alone = _gate(root, "--module", "toy.logic")
+    assert alone.returncode == 1 and "gate: stub src/toy/logic.pyi: " in alone.stdout, alone.stdout
+    assert "skip " not in alone.stdout, alone.stdout
+
+
+def test_hidden_names_each_kind_once_and_a_file_it_cannot_read(tmp_path: Path) -> None:
+    # Each finding carries its kind, file and line, the way out follows once per kind, and a file
+    # that is not Python is reported rather than passed over. A name a relative import brings in
+    # is never read as pytest's or unittest's, while an aliased import is read as what it is.
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    hidden = tests / "test_hidden.py"
+    hidden.write_text(
+        "import pytest as pt\nfrom . import skip\n\n\ndef test_x() -> None:  # crosshair: off\n"
+        "    skip()\n    pt.skip('x')  # noqa\n",
+        "utf-8",
+    )
+    broken = tests / "broken.py"
+    broken.write_text("def (:\n", "utf-8")
+    found = gate._hidden([hidden, broken], tmp_path)
+    assert found[:3] == [
+        "directive tests/test_hidden.py:5: # crosshair: off",
+        f"suppression tests/test_hidden.py:7: # noqa: {gate._NO_SUPPRESSION}",
+        f"skip tests/test_hidden.py:7: pt.skip: {gate._NO_SKIP}",
+    ]
+    assert found[3].startswith("tests/broken.py: cannot be read: ")
+    assert found[4:] == [gate._INSTEAD_OF_A_DIRECTIVE, gate._INSTEAD_OF_A_SUPPRESSION]
+    assert gate._hidden([], tmp_path) == []
+
+
+def test_imports_resolve_each_form_and_no_relative_one() -> None:
+    # `import a.b` binds the package `a`, `import a.b as c` binds `c` to the module, a from-import
+    # binds the name it brings in to its dotted origin, and a relative import binds nothing here.
+    tree = ast.parse(
+        "import a.b\nimport a.b as c\nfrom m import x as y, z\nfrom . import q\nfrom .n import r\n"
+    )
+    assert gate._imports(tree) == {"a": "a", "c": "a.b", "y": "m.x", "z": "m.z"}
+
+
+def test_checked_files_under_module_are_that_modules_own() -> None:
+    # Under --module the files read for what would hide a finding are that module's and no other.
+    config = GateConfig.from_pyproject(SRC.parent)
+    assert gate._checked_files(SRC.parent, config, [gate], "beethoven_qa.gate") == [
+        Path(str(gate.__file__))
+    ]
 
 
 def test_gate_sets_aside_only_what_is_listed_and_says_so(tmp_path: Path) -> None:

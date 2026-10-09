@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import jsonschema
 import pytest
@@ -214,11 +215,12 @@ def test_a_log_validates_and_carries_what_is_matched_on() -> None:
     run = Run("group", "tool", "1.0.0", "https://example.invalid", (rule,), head, states)
     log = sarif_log((run, run._replace(findings=(), states=())))
     validate_sarif(log)
-    result = log["runs"][0]["results"][0]  # type: ignore[index]
+    runs: Any = json.loads(json.dumps(log))["runs"]  # read back as a reader of the file would
+    result = runs[0]["results"][0]
     assert result["baselineState"] == "new" and result["ruleIndex"] == 0
     assert result["partialFingerprints"] == {FINGERPRINT: fingerprint("r/x", "a.py", "f")}
     assert result["locations"][0]["physicalLocation"]["region"] == {"startLine": 4, "endLine": 4}
-    assert log["runs"][1]["results"] == []  # type: ignore[index]
+    assert runs[1]["results"] == []
 
 
 def test_a_finding_of_a_rule_the_run_does_not_list_is_refused() -> None:
@@ -226,3 +228,17 @@ def test_a_finding_of_a_rule_the_run_does_not_list_is_refused() -> None:
     run = Run("group", "tool", "1.0.0", "https://example.invalid", (rule,), (_f("f", 1),), ("new",))
     with pytest.raises(ViolationError):
         sarif_log((run,))
+
+
+def test_a_tool_version_is_the_first_dotted_number_of_its_first_line() -> None:
+    # coverage.py says "Coverage.py, version 7.16.2 with C extension", so the last word is not the
+    # version (the log said "extension" until 5.0.0); ruff, bandit, mypy and jscpd put it last or
+    # before a parenthesis; radon and lizard print it alone. A tool that says none is "unknown".
+    from beethoven_qa.standards.group import _version_word
+
+    assert _version_word("Coverage.py, version 7.16.2 with C extension") == "7.16.2"
+    assert _version_word("ruff 0.16.10") == "0.16.10"
+    assert _version_word("mypy 2.4.0 (compiled: yes)") == "2.4.0"
+    assert _version_word("6.0.1") == "6.0.1"
+    assert _version_word("Changes") == "unknown"
+    assert _version_word("") == "unknown"

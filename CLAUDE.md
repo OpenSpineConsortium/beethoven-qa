@@ -115,16 +115,27 @@ No module is done, and the gate will not let it enter a run or reach `main`, unt
    only knowingly, and the commit says why. The same gate is the required
    check on `main` (`.github/rulesets/main.json`, applied by `rulesets.yml` with
    `RULESETS_TOKEN`); pull requests open ready for review, never as drafts; `automerge.yml` arms
-   auto-merge and the required checks alone decide.
+   auto-merge and the required checks alone decide. The rule is strict
+   (`strict_required_status_checks_policy: true`): a pull request whose branch fell behind `main`
+   waits until it carries `main`, because the checks ran on a tree `main` would never hold
+   (measured 2026-10-08 over the parallel streams' merges: with the flag off, `main`'s tree after
+   each was not what the checks had run on). Bringing a branch up to date is the session's own
+   step, merge `main` in, gate, push; a push a bot makes with `GITHUB_TOKEN` starts no workflow,
+   so no automation does it, and a pull request nobody drives (its session gone) waits there
+   until a person clicks Update branch or merges `main` into it.
 
 ## The code standards (greg, 2026-10-04 23:26Z; `docs/STANDARDS.md`)
 
 Beside the definition of done, which says whether code is correct, six groups say whether a person
 can read it, change it and trust what built it: **readability** (cognitive complexity 15,
-cyclomatic 10, 4 parameters, 25 lines of code), **design** (the Chidamber and Kemerer suite with
+cyclomatic 10, 4 parameters, 25 lines of code in the body, which is 26 as lizard's NLOC with the
+`def` line), **design** (the Chidamber and Kemerer suite with
 LCOM4), **duplication** and **coverage** (SonarSource's Sonar way conditions on new code: at most 3%
-duplicated, at least 80% covered), **security** (bandit, each finding with its CWE) and **supply
-chain** (OpenSSF Scorecard's checks of the workflow files). Each is a module of
+duplicated, in jscpd's clones of 10 lines and 40 of its tokens, at least 80% covered), **security**
+(bandit, each finding with its CWE) and **supply chain** (OpenSSF Scorecard's checks of the
+workflow files, a digest check on every download a step goes on to use, and zizmor's audits at
+its regular persona, High and Medium blocking; Scorecard itself runs in CI as a report that
+blocks nothing). Each is a module of
 `beethoven_qa.standards`, a group of `python -m beethoven_qa standards <group>|all`, a SARIF 2.1.0
 log and a job of the kit's `standards.yml`; each passes or fails alone, and the one required check
 is `standards (every group green)`. They are in this repository, not in six, because the pinned
@@ -146,7 +157,8 @@ Never skip, disable or quarantine a test, loosen a symbolic bound, remove a cont
 precondition to exclude an input the callers really pass, add a `# crosshair:` directive, exempt
 a module that holds logic, or set aside under `unproven` a function CrossHair can run, to get
 green; nor raise a standards limit, add a suppression comment the standards ignore anyway, rename a
-function to dodge its findings, or weaken a test so coverage counts fewer lines. A precondition
+function to dodge its findings, or weaken a test so coverage counts fewer lines. The gate refuses
+a suppression comment and a skipped test outright, so none of them gets green. A precondition
 that states the function's real domain, which no caller ever leaves, is not dodging (see
 `vendor.stale_files`).
 
@@ -167,8 +179,27 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   or listed, and a listed function's contracts are checked by the tests alone),
   one process per target, as many at a time as the allocation has cores (`BEETHOVEN_QA_JOBS` can
   lower it, never raise it), each condition bounded by `per_condition_timeout`. `--module` limits
-  both checks to one module (an entry of a deeper module stays that module's, imported or not);
-  `--report-all` prints every condition's verdict and fails on a precondition no input can meet.
+  both checks to one module (an entry of a deeper module stays that module's, imported or not).
+  Every run prints every condition's verdict, counts them under each target (`gate: <target>: <c>
+  confirmed over all paths, <n> not confirmed within <T> s, <u> unable to meet a precondition`,
+  right after its exit line) and over the run as the last line before the verdict (`gate:
+  conditions: <c> of <m> confirmed over all paths, <n> not confirmed within <T> s per condition,
+  <u> unable to meet a precondition`, byte for byte: the report command reads it back), and fails
+  on a precondition no input can meet, which is either a vacuous contract or one stated over values
+  CrossHair cannot build (restate it over an enum, or list the function under `unproven` with that
+  reason); `--report-all` is accepted and changes nothing. Check 1 also refuses, in the package
+  and where pytest collects (the directories `[tool.pytest.ini_options].testpaths` names, else
+  `tests/`, and a root `conftest.py`), each with its file and line: every comment a standards'
+  tool would read as a suppression (`# noqa`, `# type: ignore`, `# nosec`, `# pragma: no cover`,
+  `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`, the file-level `# ruff: noqa` and
+  `# flake8: noqa`, every `# mypy:` configuration comment, isort's `skip`, `skip_file` and `off` (in ruff's own spelling too),
+  the formatter's `# fmt: off` and `# fmt: skip`, and lizard's `#lizard forgive` and `GENERATED
+  CODE`), every test skipped or expected to fail (pytest's and unittest's marks, calls and
+  exceptions wherever the name is written, a decorator, `pytestmark`, `pytest.param`,
+  `add_marker`, a `raise`, a case's `skipTest`, however imported), and a `.pyi` stub beside a
+  module, which mypy checks in the module's place (measured). A string that spells one is no
+  finding, a pinned copy under `vendor/` is never read, and under `--module` only that module's
+  own file and a stub beside it are.
 - `beethoven_qa.vendor`, `python -m beethoven_qa vendor --into <repo> --ref <tag> [--kit]` and
   `python -m beethoven_qa vendor-check [--source <beethoven-qa checkout>]`: the pinned copy at
   `vendor/beethoven-qa/`, with its `ORIGIN` record, and the check that the copy and the kit files
@@ -177,7 +208,7 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   `pull.sh`: only a commit `main` contains, each file's bytes checked against the blob id the
   commit's tree gives it, no checkout of beethoven-qa read; it runs from the consumer's own copy
   (from a clone of the release the first time, when the copy is older than 3.0.0), and the `cli`
-  export is at version 2 for the new required `--ref`. The plain
+  export went to version 2 for the new required `--ref` (and to 3 in 5.0.0, for `report`). The plain
   check catches an edit that leaves ORIGIN alone; an edit that also rewrites ORIGIN is caught only
   with `--source`, which rebuilds the tree from the commit ORIGIN names (docs/CONSUMING.md). So is
   an edit to the copy's own `vendor.py`, since the consumer's environment runs the copy's code:
@@ -216,11 +247,25 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   of rule 1 or 4 that must stand is an entry of `[tool.beethoven-qa.boundary]` (file, what
   matched, why), printed on every run and refused when stale; this repository needs none. Exit 0
   when the rules hold, 1 on a finding (`file:line: rule N:` and a sentence), 2 when it cannot run.
+- `beethoven_qa.report` and `python -m beethoven_qa report [--root DIR] [--out DIR]` (from
+  5.0.0; `docs/REPORT.md`): the evidence report a person hands to anyone who doubts code written
+  by an AI. It runs every lane the gate runs, read from `pixi.toml`'s `[tasks]` (lint, typecheck,
+  test, boundary, symbolic, standards, and vendor-check where the pinned copy is), each command
+  as its own process in the environment it was started in, the standards lane given `--sarif`,
+  and writes `report.md` and `report.json` with the repository, the lock's versions beside each
+  tool's own `--version`, every lane's argv, exit code, wall time and output file, the gate's
+  counts (per target, the totals, the unproven list), each standards group's SARIF counts by
+  level and state, the enforcement facts (`core.hooksPath`, the hook's command, the ruleset's
+  required checks, the workflows' jobs), who decides each verdict, where a language model is
+  involved and what the report does not show. Exit 0, 1 (a lane failed; the report still
+  written) or 2 (cannot run). `pixi run --locked report`; CI's job `report (evidence)` keeps the
+  folder as an artifact and is not a required check.
 - `interface/` (from 2.0.0): this repository's manifest under that standard, `INTERFACE.json`, with
   `python.json` (the modules and names a consumer may import: `beethoven_qa.contracts` and
-  `__version__`, nothing else) and `cli.json` (the five commands, their options and exit codes,
+  `__version__`, nothing else) and `cli.json` (the seven commands, their options and exit codes,
   the `[tool.beethoven-qa]` table); exports `python`, `cli`, `kit`, `plugin` (files: Claude Code
-  reads it, nobody runs it) and `docs` (text), each at version 1 (`interface/README.md`). The copy
+  reads it, nobody runs it) and `docs` (text); `cli` is at version 3 and `kit` at 2 since 5.0.0,
+  the others at 1 (`interface/README.md`). The copy
   carries it, so a consumer finds it at `vendor/beethoven-qa/interface/`;
   `tests/test_interface.py` holds it to the code.
 - The repository kit, carried byte for byte by every consumer: `.githooks/pre-push`,
@@ -229,7 +274,12 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   consumer takes it with its next copy (`vendor --kit`); a consumer that re-pins to a release whose
   kit changed without `--kit` fails `vendor-check` on the file that differs until it does, by
   design. Release 2.0.0 adds `standards.yml` and changes `automerge.yml` and `rulesets.yml` (actions
-  pinned to a commit, writes granted on the job only).
+  pinned to a commit, writes granted on the job only). Release 5.0.0 changes
+  `standards.yml` (the pixi download checked against its sha256 before it is run, the
+  `scorecard (report)` job), `session-start.sh` (the same digest check; a pixi whose digest
+  differs is removed and said so, and the session still starts) and `automerge.yml` (its header
+  says what the strict checks policy of `.github/rulesets/main.json` means for a branch behind
+  `main`).
 - `plugin/` and `.claude-plugin/marketplace.json`: the Claude Code plugin `beethoven-qa` (skills,
   the `stream` agent, the workflows `gate-until-green`, `verify-module`, `improve-module`, and from
   4.0.0 the code standards' `PostToolUse` hook under `plugin/hooks/`). On a
@@ -325,7 +375,40 @@ that states the function's real domain, which no caller ever leaves, is not dodg
 - The code standards (2026-10-05): what was measured while building them, the tools' behaviour
   without the flags that disable a repository's suppressions among it, is under "Measured" in
   `docs/STANDARDS.md`. The symbolic gate went from 10 targets in about 2 minutes to 32 in about 7
-  on 4 cores.
+  on 4 cores, to 41 by 2026-10-08 and to 56 with 5.0.0 (below).
+
+- Every verdict, every run (2026-10-08, this cloud session, 4 cores; CrossHair 0.0.111). Until this
+  change the plain gate, the one the pre-push hook and CI run, started CrossHair without
+  `--report_all`, so it saw no condition's verdict and passed a precondition no input can meet in
+  silence; only `--report-all` showed them. Measured with it on the package as it stood: 107 of
+  117 conditions were "Not confirmed" at the 20 s bound, so the symbolic step is a bounded search
+  for most conditions and a proof for the rest; and the one target reported "Unable to meet
+  precondition", `standards.security.level_for`, was not vacuous: its precondition held two
+  strings to bandit's four grades, and CrossHair found no input for it within the bound. Stated
+  as `Literal["UNDEFINED", "LOW", "MEDIUM", "HIGH"]`, CrossHair 0.0.111 raised inside its own
+  argument builder (`get_type_hints` on the Literal, in `proxy_for_class`); as the `StrEnum`
+  `Grade` it enumerates the members, both conditions are confirmed over all paths in about a
+  second, and a body that ignored the confidence gave the counterexample `(Grade.HIGH, Grade.LOW)`.
+  The vacuity line now says both possibilities. Every run prints every verdict and counts them:
+  the package-wide gate (`pixi run --locked symbolic`) reported, on the stream's tree of 41
+  targets, `gate: conditions: 11 of 121 confirmed over all paths, 110 not confirmed within 20 s
+  per condition, 0 unable to meet a precondition` in 11 min 57 s wall time on 4 cores shared with
+  two other sessions' test runs, and on 5.0.0's tree of 56 targets `13 of 165 confirmed
+  over all paths, 152 not confirmed within 20 s per condition, 0 unable to meet a precondition`
+  in 14 min 3 s (measured at 89a3da8); the module gate on
+  `beethoven_qa.gate` (6 targets, `verdicts` among them) 1 of 21
+  confirmed over all paths (`is_public`), 20 not confirmed at the bound, every one of them over
+  strings or tuples, no counterexample, in 2 min 6 s. The suppression check, run on
+  this repository first, found the five comments it carried, all in tests (four `type: ignore`
+  on deliberate wrong calls and on a SARIF log indexed as an untyped mapping, one `noqa` on a
+  bound lambda for a rule the ruff configuration ignores anyway), and nothing in the package;
+  each went by typing the wrong value `Any`, reading the log back as JSON, or writing a `def`.
+- The gate refused its own branch once more before the pull request (2026-10-08, fixed in
+  89a3da8): `report.deciders` promised that the merge row ends with `; no person` exactly when
+  the ruleset names no bypass, and CrossHair built a bypass named `; no person`; the row joined
+  the names after a colon, so one named that way spelled the other ending. The row now ends with
+  a fixed phrase either way, and the five conditions come back not confirmed at the bound with no
+  counterexample. A contract over joined strings pins an ending the inputs cannot spell.
 
 ## Build and test
 
@@ -335,7 +418,8 @@ pixi run --locked gate        # lint (ruff) + typecheck (mypy strict) + tests (p
 pixi run --locked symbolic    # just the gate: python -m beethoven_qa gate
 pixi run --locked standards   # the code standards, every group, against where this branch left main
 pixi run --locked boundary    # the interface standard's five rules on this tree
-pixi run --locked python -m beethoven_qa gate --module beethoven_qa.vendor --report-all   # one module
+pixi run --locked report      # the evidence report into ./report (docs/REPORT.md): every lane again, about twenty minutes
+pixi run --locked python -m beethoven_qa gate --module beethoven_qa.vendor  # one module
 pixi run hooks                # point git at .githooks (the session-start hook does this in a cloud session)
 ```
 
@@ -354,7 +438,7 @@ tree with uncommitted or untracked files: commit everything first.
 - `src/beethoven_qa/` — `contracts.py`, `gate.py`, `vendor.py`, `boundary.py`, `example.py`,
   `__main__.py` (the command line; exempt from the contract rule as wiring and I/O), `standards/`
   (one module per group; `findings.py`, `newcode.py`, `sarif.py` and `group.py` shared; `run.py`
-  the runner).
+  the runner), `report.py` (the evidence report, `docs/REPORT.md`).
 - `tests/` — pytest under typeguard's import hook; `test_hooks.py` runs the kit's real pre-push
   hook with a stub pixi, a bare remote and a linked worktree.
 - `plugin/` — the Claude Code plugin (`hooks/` holds the coaching hook); `.claude-plugin/marketplace.json` — the marketplace listing it.
@@ -363,7 +447,7 @@ tree with uncommitted or untracked files: commit everything first.
   module loading, `new.target`, both grammars); `tools/check_workflows.test.mjs` — its tests, and
   the workflow scripts' control flow under stand-in hooks (`node --test
   tools/check_workflows.test.mjs`).
-- `docs/` — `CONSUMING.md`, `STANDARDS.md`, `PARALLEL_BUILD.md`.
+- `docs/` — `CONSUMING.md`, `STANDARDS.md`, `REPORT.md`, `PARALLEL_BUILD.md`.
 - `tests/data/` — the OASIS SARIF 2.1.0 schema every standards log is validated against, with its
   source in `tests/data/README.md`.
 - `.githooks/`, `.github/`, `.claude/` — the kit, the CI lanes, the rule as code, session settings.

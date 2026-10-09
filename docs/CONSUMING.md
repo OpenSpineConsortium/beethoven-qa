@@ -52,6 +52,9 @@ Anthropic's marks, used here to say what it runs.
   .github/workflows/ci.yml          its own: the gate lane (step 5) and any lanes of its own
   .github/rulesets/main.json        its own: names its required checks
   .claude/settings.json             its own: wires the session-start hook, worktree.baseRef
+  .gitignore                        its own: report/ among its lines (the evidence report is
+                                    handed over, never committed; untracked, it would make the
+                                    pre-push hook refuse the next push)
 ```
 
 The kit files are byte for byte the release's; `vendor-check` fails one that differs. A change to
@@ -151,7 +154,7 @@ copy, its ORIGIN and the kit files together, the message naming the release.
 ## 2. The consumer's `pixi.toml`
 
 The same verification stack as beethoven-qa's own `pixi.toml` (copy its dependency lines; they are
-repeated here as they stand at 2.0.0, but `jsonschema`, which only beethoven-qa's own tests use),
+repeated here as they stand at 5.0.0, but `jsonschema`, which only beethoven-qa's own tests use),
 the repository's own dependencies beside them, the copy on `PYTHONPATH`, and the seven lanes of the
 gate:
 
@@ -160,7 +163,10 @@ gate:
 name = "<repo>"
 version = "0.0.0"
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+# One platform, named apart from its subdirectory because it states a glibc floor: jscpd (the
+# duplication detector, from PyPI) ships manylinux_2_34 wheels only. A `[target.linux-64.…]` table
+# still applies under the named entry (measured with pixi 0.81.0, 2026-10-08).
+platforms = [{ name = "linux-64-glibc234", platform = "linux-64", glibc = "2.34" }]
 # Only while no package comes from both conda-forge and PyPI; beethoven-qa's pixi.toml says why.
 conda-pypi-map = false
 
@@ -182,10 +188,13 @@ bandit = ">=1.9"
 coverage = ">=7.10"
 pyyaml = ">=6"
 types-pyyaml = ">=6"
+zizmor = ">=1.30"
+lizard = ">=1.24"
 # The repository's own dependencies follow here.
 
 [pypi-dependencies]
 crosshair-tool = ">=0.0.60"
+jscpd = ">=5.4"
 
 [activation]
 # The repository's package and the pinned copy, imported without a build step. Absolute, so an
@@ -201,6 +210,8 @@ symbolic = "python -m beethoven_qa gate"
 standards = "python -m beethoven_qa standards all"
 vendor-check = "python -m beethoven_qa vendor-check"
 boundary = "python -m beethoven_qa boundary"
+# The evidence report (docs/REPORT.md of beethoven-qa): every lane above run and written up.
+report = "python -m beethoven_qa report"
 gate = { depends-on = ["lint", "typecheck", "test", "boundary", "symbolic", "standards", "vendor-check"] }
 hooks = "git config core.hooksPath .githooks"
 ```
@@ -235,13 +246,21 @@ The gate's symbolic lane runs one CrossHair process per contracted function and 
 class, as many at a time as the allocation's cores; `BEETHOVEN_QA_JOBS` lowers the count on a
 laptop busy with other work and never raises it. Both of the gate's checks always run, so an
 uncontracted function in one module does not stop CrossHair proving the others. For one module,
-`python -m beethoven_qa gate --module <pkg.mod>`; with `--report-all` it prints every condition's
-verdict and fails on a precondition no input can meet. Beyond a missing contract, the gate fails
+`python -m beethoven_qa gate --module <pkg.mod>`. Every run prints every condition's verdict,
+counts them under each target and over the run, and fails on a precondition no input can meet
+(`--report-all` is accepted and changes nothing). Beyond a missing contract, the gate fails
 on whatever would keep a function out of CrossHair's sight: a `.py` file under the package that is
 not one of its modules (a directory without `__init__.py`), a module that fails or exits while
 being imported, a `# crosshair:` directive, a public coroutine (CrossHair would check the coroutine
 object, not its result), contracts on a pydantic model (CrossHair does not construct one), and a
-package with nothing to prove.
+package with nothing to prove; and on what would hide a finding from the standards or a test
+from the run, in the package and where pytest collects (`testpaths`, else `tests/`, and a root
+`conftest.py`): a suppression comment (`# noqa`, `# type: ignore`, `# nosec`, `# pragma: no
+cover`, `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy: ignore`, the file-level `# ruff:
+noqa` and `# flake8: noqa`, every `# mypy:` configuration comment, isort's `skip`, `skip_file`
+and `off` (in ruff's own spelling too), `# fmt: off` and `# fmt: skip`, lizard's `#lizard forgive` and `GENERATED CODE`), a
+test skipped or expected to fail (pytest's and unittest's marks, calls and exceptions wherever
+the name is written), or a `.pyi` stub beside a module, which mypy checks in the module's place.
 
 A function CrossHair must not run, because it reads, writes, asks the clock or the environment or
 starts a process, or cannot run, because of a fault of CrossHair's own that was measured, is named
@@ -349,9 +368,9 @@ decorators, runs the commands, carries the kit and registers the plugin):
   "imports": [
     {"repository": "OpenSpineConsortium/beethoven-qa", "export": "python", "version": 1,
      "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"},
-    {"repository": "OpenSpineConsortium/beethoven-qa", "export": "cli", "version": 1,
+    {"repository": "OpenSpineConsortium/beethoven-qa", "export": "cli", "version": 3,
      "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"},
-    {"repository": "OpenSpineConsortium/beethoven-qa", "export": "kit", "version": 1,
+    {"repository": "OpenSpineConsortium/beethoven-qa", "export": "kit", "version": 2,
      "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"},
     {"repository": "OpenSpineConsortium/beethoven-qa", "export": "plugin", "version": 1,
      "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"}
@@ -362,8 +381,9 @@ decorators, runs the commands, carries the kit and registers the plugin):
 What beethoven-qa offers is its own manifest, which the copy carries
 (`vendor/beethoven-qa/interface/INTERFACE.json`, explained in `interface/README.md` there): `python`
 (`beethoven_qa.contracts` and `beethoven_qa.__version__`, nothing else of the package), `cli` (the
-five commands, their options and exit codes, and this table), `kit`, `plugin`, and `docs`, the two
-documents, which the copy does not carry and an import of which the lane refuses. An import of
+seven commands, their options and exit codes, and this table), `kit`, `plugin`, and `docs`, the
+three documents (`CONSUMING.md`, `STANDARDS.md`, `REPORT.md`), which the copy does not carry and
+an import of which the lane refuses. An import of
 beethoven-qa into any other folder, or of an export or version the copy's manifest does not offer,
 is a finding of rule 3. Which exports a repository takes is the person's to write; the lane checks
 that each one is there, and that the code imports nothing the `python` export does not list.
@@ -419,8 +439,11 @@ on:
   workflow_dispatch:
 
 env:
-  # The pixi that produced the committed lock, fetched from its release asset by name.
+  # The pixi that produced the committed lock, fetched from its release asset by name, and the
+  # sha256 of that asset: beethoven-qa's own measurement of 2026-10-08 (pixi publishes no
+  # checksum asset). A new pixi version means a new digest, measured again.
   PIXI_VERSION: 0.81.0
+  PIXI_SHA256: 248510f5f75460a2ae4ec62d761e15c0191dc35db3b1da6f82d9f17c6017051d
 
 # Nothing writes; the supply-chain standard refuses a workflow without this, or one that grants a
 # write at the top.
@@ -438,9 +461,12 @@ jobs:
         with:
           persist-credentials: false
       - name: install pixi
+        # Checked against its digest before it is made executable or run (the supply-chain
+        # standard refuses a download a step runs, installs or chmods without such a check).
         run: |
           curl -fsSL -o /usr/local/bin/pixi \
             "https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl"
+          echo "${PIXI_SHA256}  /usr/local/bin/pixi" | sha256sum -c - || { rm -f /usr/local/bin/pixi; exit 1; }
           chmod 0755 /usr/local/bin/pixi
           pixi --version
       - name: reconstruct the environment from the lock
@@ -484,7 +510,7 @@ adds its image lane):
     {
       "type": "required_status_checks",
       "parameters": {
-        "strict_required_status_checks_policy": false,
+        "strict_required_status_checks_policy": true,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
           {
@@ -501,6 +527,15 @@ adds its image lane):
   ]
 }
 ```
+
+The policy is strict: a pull request whose branch fell behind `main` is not merged until it
+carries `main`, since the checks ran on a tree `main` would never hold (beethoven-qa measured on
+2026-10-08, over the parallel streams' merges, that with the flag off `main`'s tree after each
+was not what the checks ran on). Bringing the branch up to date is the session's own step (merge
+`main` in, gate, push); a push a bot makes with `GITHUB_TOKEN` starts no workflow, so no
+automation does it, and a pull request nobody drives (its session gone) waits there until a
+person clicks Update branch or merges `main` into it. The kit's `scorecard (report)` job is named
+by no rule: it reports and never blocks.
 
 The kit's `rulesets.yml` applies that file with the `RULESETS_TOKEN` secret, and the kit's
 `automerge.yml` arms auto-merge only once `main` carries a required-checks rule. So a new repository
@@ -554,7 +589,8 @@ rules (beethoven-research's are the model):
 The plugin is `plugin/` (name `beethoven-qa`), listed by `.claude-plugin/marketplace.json`
 (marketplace `beethoven-qa`, plugin source `"./plugin"`). Its skills run as
 `/beethoven-qa:definition-of-done`, `/beethoven-qa:write-verified-module`,
-`/beethoven-qa:improve-existing-module` and `/beethoven-qa:review-contracts`; its agent is
+`/beethoven-qa:improve-existing-module`, `/beethoven-qa:review-contracts` and
+`/beethoven-qa:code-standards`; its agent is
 `beethoven-qa:stream`; its workflows run as `/beethoven-qa:gate-until-green`,
 `/beethoven-qa:verify-module` and `/beethoven-qa:improve-module` (a plugin workflow runs as
 `/<plugin>:<meta.name>`, workflows page, "Distribute a workflow in a plugin").
@@ -608,8 +644,9 @@ What the pages say, and where (all 2026-10-04):
   its subsection "What runs under `allowManagedHooksOnly`": "Force-enabled plugin hooks run: hooks
   from plugins your managed settings force-enable through `enabledPlugins`". It matches on the full
   `plugin@marketplace` id, so a same-named plugin from another marketplace stays blocked; plugins
-  with a `command` source are disabled under that key, and this one is a relative path. The plugin
-  ships no hooks at 1.0.0; this is what lets it carry vetted ones later.
+  with a `command` source are disabled under that key, and this one is a relative path. The
+  plugin's one hook, the coaching hook of 4.0.0, runs under that key for this reason (not yet
+  seen running in the image: `docs/STANDARDS.md`, "Not yet measured").
 - Why managed settings and not the repository's: a repository's `extraKnownMarketplaces` is honoured
   only after the workspace trust dialog, and in a folder not trusted, a `-p` run there included, it
   is ignored without a message (settings reference, `extraKnownMarketplaces`). Managed settings are
@@ -691,6 +728,60 @@ dialog, which a cloud session never shows; no thread has tried it.
    `{"hooks": {"PostToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command",
    "command": "bash \"$CLAUDE_PROJECT_DIR\"/vendor/beethoven-qa/plugin/hooks/coach.sh",
    "timeout": 60}]}]}}`. That file is the repository's own, not the kit's.
+   **From 4.0.0 to 5.0.0**: the release makes the gate stricter, puts three established tools
+   beside the home-made code, and adds the `report` command. Take it with `--ref v5.0.0 --kit`,
+   then, in the same change:
+   - **The gate.** It now runs CrossHair with every condition's verdict on every run (the old
+     `--report-all` is the default; the flag stays accepted and changes nothing), prints under
+     each target and at the end how many conditions were confirmed over all paths and how many
+     were not confirmed within the bound, and fails on a precondition no input can meet: either a
+     vacuous contract, or one stated over values CrossHair 0.0.111 cannot build (measured
+     2026-10-08 in beethoven-qa's own `security.level_for`, a `str` checked against a set of
+     names; the assessment of the same day reported four functions of beethoven-agents the same
+     way, `bee.accounts.host_transcript`, `bee.handoff.extraction_prompt`,
+     `bee.handoff.hydration_prompt` and `guard.check_path`, whose preconditions hold a path
+     non-empty or absolute, and whether this gate reports them unmet was not run here). Restate
+     a contract over a few names as an enum (a `Literal` makes CrossHair 0.0.111 raise); one over
+     a path CrossHair cannot build, state the domain it can, or list the function under
+     `[tool.beethoven-qa.unproven]` with that reason. The gate also refuses, in the
+     package and where pytest collects, every suppression comment (`# noqa`, `# type: ignore`,
+     `# nosec`, `# pragma: no cover`, `# jscpd:ignore`, `# zizmor: ignore`, `# complexipy:
+     ignore`, the file-level forms, every `# mypy:` comment, isort's and the formatter's
+     markers, lizard's `forgive` and `GENERATED CODE`), every pytest or unittest skip or expected
+     failure however it is written, and a `.pyi` stub beside a module: remove them and fix what
+     they hid.
+   - **The dependency lines.** Add `zizmor` and `lizard` (conda-forge) and `jscpd` (PyPI) as
+     step 2 now shows them, and give the platform entry jscpd's glibc floor
+     (`platforms = [{ name = "linux-64-glibc234", platform = "linux-64", glibc = "2.34" }]`); a
+     `[target.linux-64.…]` table still applies under the named entry, and so does one named
+     `linux-64-glibc234` (measured with pixi 0.81.0, 2026-10-08). Re-lock on purpose and say so.
+     The readability group now refuses to run on a function lizard cannot count at the head of
+     a change (a return annotation over several lines, a dedented continuation line, a nested
+     function written on its `def` line), naming it; put the signature on one line, the nested
+     body on a line of its own. The same shape at the base is left out, never refused. The
+     duplication group's floor is jscpd's: 10 lines and 40 of its tokens.
+   - **The kit is at version 2.** All five files are still the kit: `.githooks/pre-push`,
+     `.github/workflows/automerge.yml`, `.github/workflows/rulesets.yml`,
+     `.claude/hooks/session-start.sh` and `.github/workflows/standards.yml`; three of them change
+     (`standards.yml` checks the pixi download against its digest and gains the `scorecard
+     (report)` job, which is not a required check; `session-start.sh` checks the same download;
+     `automerge.yml` says what the strict policy below means). `--kit` takes all five. The
+     repository's own `ci.yml` is not the kit's: give its pixi download the same digest check
+     (step 5 shows it; the supply-chain group now reports a download a step goes on to run without
+     one) and, if the report is wanted on every run, the `report (evidence)` job from
+     beethoven-qa's `ci.yml`, which is not a required check either (it hands the report the
+     event's base commit as `--base`, the way `standards.yml` does); add the `report` task to
+     `pixi.toml` as step 2 shows, and `report/` to `.gitignore` (the report is handed over, never
+     committed, and an untracked folder makes the kit's pre-push hook refuse the next push).
+   - **The ruleset.** Set `strict_required_status_checks_policy` to `true` in
+     `.github/rulesets/main.json` (step 5): a pull request whose branch fell behind `main` then
+     waits until its branch carries `main`. A session updates its own branch (merge `main` in,
+     gate, push); nothing automates it, because a push made with `GITHUB_TOKEN` starts no checks,
+     and a pull request nobody drives waits until a person clicks Update branch or merges `main`
+     into it.
+   - **The `cli` export is at version 3** (`report` added; `--report-all` the default): change
+     the import in the repository's `interface/INTERFACE.json`, or the boundary lane says the copy
+     no longer offers `cli` version 2.
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
    old and the new release; then a pull request, ready for review, which merges when the gate is
    green. A red gate after an update is reported red and fixed at its cause, in the consumer's code

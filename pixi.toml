@@ -18,7 +18,10 @@ channels = ["conda-forge"]
 # linux-64 only: every engine job runs inside the Apptainer image on the cluster's x86_64 compute nodes,
 # and the lock must match the platform a run actually executes on. Dev-laptop platforms (osx-arm64,
 # linux-aarch64) can be added here when someone needs them; each widens the solve and the lock.
-platforms = ["linux-64"]
+platforms = [{ name = "linux-64-glibc234", platform = "linux-64", glibc = "2.34" }]
+# glibc 2.34 or later, because jscpd (the duplication detector, from PyPI) ships manylinux_2_34
+# wheels only. The Apptainer image (ubuntu:24.04), GitHub's runners and a cloud session all have
+# it; the grid's CentOS 7 login node (2.17) never runs the gate, by the grid rules.
 # Same-name derivation is off so the solve does not depend on an external conda<->PyPI mapping
 # host. The cost is an overlap the lock does record: CrossHair's PyPI requirements bring PyPI copies
 # of packaging, typing-extensions and mypy-extensions beside conda-forge's, at the same versions,
@@ -50,11 +53,16 @@ coverage = ">=7.10"      # coverage: line coverage of the tests, read for the ne
 pyyaml = ">=6"           # supply chain: the workflow files
 types-pyyaml = ">=6"     # mypy's stubs for pyyaml
 jsonschema = ">=4"       # tests only: every SARIF file validates against the OASIS 2.1.0 schema
+zizmor = ">=1.30"        # supply chain: the established auditor of the workflow files, beside the reader here
+lizard = ">=1.24"        # readability: lines of code per function (NLOC)
 
 [pypi-dependencies]
 # The symbolic-proof layer. CrossHair is published on PyPI only (not conda-forge); it pulls in
 # z3-solver itself, so z3 is not declared separately (the overlap it brings is described above).
 crosshair-tool = ">=0.0.60"
+# The duplication detector (Rabin-Karp over tokens), published on PyPI as a self-contained binary
+# wheel (manylinux_2_34; the glibc floor above). Read through its JSON report.
+jscpd = ">=5.4"
 
 [activation]
 # The package is imported from src/ without a build step. Absolute, so `pixi run --manifest-path`
@@ -80,5 +88,9 @@ standards = "python -m beethoven_qa standards all"
 # another is a pinned copy with its ORIGIN. It reads what git tracks and needs no network.
 boundary = "python -m beethoven_qa boundary"
 gate = { depends-on = ["lint", "typecheck", "test", "boundary", "symbolic", "standards"] }
+# The evidence report (docs/REPORT.md): the lanes above, each command as its own process, written
+# up with who decided each verdict, for anyone who doubts code written by an AI. Not a lane of the
+# gate, which it would only run twice; CI keeps its output as an artifact.
+report = "python -m beethoven_qa report"
 # The gate before every push, not only in CI: one command points git at the repository's hooks.
 hooks = "git config core.hooksPath .githooks"

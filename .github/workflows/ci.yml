@@ -2,8 +2,8 @@ name: ci
 # The definition of done for beethoven-qa itself, and for the plugin it ships. No job holds a secret
 # and none reaches a university's cluster: GitHub's runners cannot (the university's own sign-in
 # stands between, at Wayne State a VPN and a one-time code), and tokens never enter a repository
-# (CLAUDE.md). The two job names are the required checks in .github/rulesets/main.json; renaming
-# a job means changing that file in the same pull request.
+# (CLAUDE.md). The gate and plugin job names are the required checks in .github/rulesets/main.json;
+# renaming either means changing that file in the same pull request. The report job is not one.
 on:
   push:
     branches: [main]
@@ -14,6 +14,11 @@ env:
   # The pixi that produced the committed lock. Fetched from its release asset by name, not from an
   # install script, so the run makes one fetch it can account for.
   PIXI_VERSION: 0.81.0
+  # The sha256 of that asset (pixi-x86_64-unknown-linux-musl of v0.81.0): this repository's own
+  # measurement of 2026-10-08, from two downloads at different times, equal to the binary the
+  # session that pinned the lock runs; pixi's release publishes no checksum asset to compare with.
+  # A new pixi version means a new digest, measured again the same way.
+  PIXI_SHA256: 248510f5f75460a2ae4ec62d761e15c0191dc35db3b1da6f82d9f17c6017051d
   # The Claude Code CLI the plugin is validated with; `claude plugin validate` needs no sign-in.
   # Pinned so a green check means the same thing tomorrow; raise it on purpose, in its own commit.
   CLAUDE_CODE_VERSION: 2.1.289
@@ -23,9 +28,9 @@ permissions:
 
 jobs:
   gate:
-    # The substrate reconstructs from the lock alone, then the four gates run inside it. The tests
-    # include the gate run against two throwaway packages and the pinned copy's round trip in
-    # throwaway git checkouts.
+    # The substrate reconstructs from the lock alone, then the gate's lanes run inside it (the
+    # standards are standards.yml's). The tests include the gate run against two throwaway
+    # packages and the pinned copy's round trip in throwaway git checkouts.
     name: gate (lock → lint, typecheck, tests, CrossHair/Z3)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -34,9 +39,12 @@ jobs:
         with:
           persist-credentials: false
       - name: install pixi
+        # The digest is checked before the file is made executable or run; a file that is not the
+        # one measured is removed and the job fails.
         run: |
           curl -fsSL -o /usr/local/bin/pixi \
             "https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl"
+          echo "${PIXI_SHA256}  /usr/local/bin/pixi" | sha256sum -c - || { rm -f /usr/local/bin/pixi; exit 1; }
           chmod 0755 /usr/local/bin/pixi
           pixi --version
       - name: reconstruct the environment from the lock
@@ -48,6 +56,8 @@ jobs:
         run: pixi run --locked typecheck
       - name: tests (typeguard enclave)
         run: pixi run --locked test
+      - name: boundary (the interface standard's rules)
+        run: pixi run --locked boundary
       - name: symbolic verification (CrossHair + Z3)
         run: pixi run --locked symbolic
       - name: shell syntax of the kit
@@ -82,3 +92,57 @@ jobs:
         # Node's own test runner: the checker against scripts it must refuse and accept, and the
         # three workflow scripts run under stand-in hooks, with no agent started.
         run: node --test tools/check_workflows.test.mjs
+
+  report:
+    # The evidence report (docs/REPORT.md): every lane the gate runs, each command as its own
+    # process, with the gate's counts, the standards' SARIF logs and the enforcement facts, written
+    # for anyone who doubts code written by an AI. Not a required check: the gate job decides, and
+    # this job's artifact is what a reader opens; its exit code says the same as the lanes'.
+    name: report (evidence)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The standards lane reads the base commit's objects to tell an old finding from a new one.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: install pixi
+        # The same digest check as the gate job's: nothing downloaded runs unchecked.
+        run: |
+          curl -fsSL -o /usr/local/bin/pixi \
+            "https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/pixi-x86_64-unknown-linux-musl"
+          echo "${PIXI_SHA256}  /usr/local/bin/pixi" | sha256sum -c - || { rm -f /usr/local/bin/pixi; exit 1; }
+          chmod 0755 /usr/local/bin/pixi
+          pixi --version
+      - name: reconstruct the environment from the lock
+        run: pixi install --locked
+      - name: the commit the new code starts from
+        # The same base as standards.yml gives its groups, so the report's standards section
+        # says what the required check said of the same commit; on a push to main the lane's
+        # own default (the merge base with main) would be the commit itself, and nothing new.
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base=auto
+          if [ "$EVENT" = pull_request ]; then
+            base=HEAD^1
+          elif [ "$EVENT" = push ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            base="$BEFORE"
+          elif [ "$EVENT" = push ]; then
+            base=none  # a new branch or a rewritten one: no commit to compare with
+          fi
+          echo "BASE=$base" >> "$GITHUB_ENV"
+          echo "the new code starts from: $base"
+      - name: the evidence report
+        run: pixi run --locked report --base "$BASE"
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-report
+          path: report/
+          if-no-files-found: ignore
+          retention-days: 30

@@ -9,15 +9,21 @@ SARIF logs checked, every log against the OASIS schema.
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
+import tokenize
 from pathlib import Path
+from typing import Any
 
 import pytest
+from beartype.roar import BeartypeCallHintParamViolation
+from pydantic import ValidationError
 
 from beethoven_qa.__main__ import main
 from beethoven_qa.standards import (
@@ -31,9 +37,11 @@ from beethoven_qa.standards import (
     supply_chain,
 )
 from beethoven_qa.standards.group import Context, Report
+from beethoven_qa.standards.newcode import Changes
 from beethoven_qa.standards.sarif import sarif_log
 from test_standards import validate_sarif
 
+REPO = Path(__file__).resolve().parent.parent
 PKG = "src/pkg"
 
 # Cognitive complexity 19 (Campbell's rules: each loop and if 1 plus its nesting, each run of a
@@ -156,6 +164,7 @@ def test_a_new_function_over_a_limit_blocks_whatever_its_comments_say(tmp_path: 
     loose = f"[tool.ruff.lint.mccabe]\nmax-complexity = 50\n[tool.complexipy]{cx}"
     ruff = '[lint]\nignore = ["C901", "PLR0913"]\nexclude = ["src/pkg/new.py"]\n'
     files = {"ruff.toml": ruff, "complexipy.toml": cx, f"{PKG}/.complexipy.toml": cx}
+    files["whitelizard.txt"] = "long\n"  # lizard's whitelist, looked for in the working directory
     root = _repo(tmp_path, files, extra_toml=loose)
     params = "def many(a, b, c, d, e):\n    return a\n\n\n"
     params += "class K:\n    def m(self, a, b, c, d):\n        return a\n"
@@ -182,6 +191,176 @@ def test_the_base_is_read_from_git_not_from_its_export_attributes(tmp_path: Path
     attributes = {".gitattributes": f"{PKG}/legacy.py export-ignore\n"}
     root = _repo(tmp_path, {f"{PKG}/legacy.py": TANGLED, **attributes})
     _write(root, {f"{PKG}/fresh.py": "X = 1\n"})
+    assert _check(root, "readability").passed
+
+
+LENGTH = readability.LENGTH
+
+
+# The count readability.py made itself before lizard, kept as the oracle lizard's NLOC is held to
+# where the two must agree: a plain body of N statements is N lines of code, N + 1 with the def.
+
+
+def _code_lines(source: str) -> frozenset[int]:
+    skip = {tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT}
+    skip |= {tokenize.ENCODING, tokenize.ENDMARKER}
+    lines: set[int] = set()
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type not in skip:
+            lines.update(range(tok.start[0], tok.end[0] + 1))
+    return frozenset(lines)
+
+
+def _first_statement(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    body = node.body
+    docstring = (
+        isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    )
+    rest = body[1:] if docstring else body
+    return rest[0].lineno if rest else (node.end_lineno or node.lineno) + 1
+
+
+def _home_made(source: str) -> dict[int, int]:
+    # Each function's body length by its def line, as the group counted it before lizard.
+    code = _code_lines(source)
+    found = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            last = node.end_lineno or node.lineno
+            found[node.lineno] = readability.body_length(code, _first_statement(node), last)
+    return found
+
+
+def _statements(n: int, indent: str = "    ") -> str:
+    return "".join(f"{indent}x{i} = {i}\n" for i in range(n))
+
+
+def _lengths(report: Report) -> dict[str, tuple[int, str]]:
+    # Each function-length finding's anchor, with its value and its state against the base.
+    pairs = (zip(r.findings, r.states, strict=True) for r in report.runs)
+    return {f.anchor: (f.value, s) for pair in pairs for f, s in pair if f.rule == LENGTH}
+
+
+def test_twenty_five_lines_of_body_pass_and_twenty_six_fail(tmp_path: Path) -> None:
+    # The Drive file's 25 lines in the body are 26 of lizard's NLOC, which counts the def line.
+    root = _repo(tmp_path, {})
+    full, over = "def full():\n" + _statements(25), "def over():\n" + _statements(26)
+    _write(root, {f"{PKG}/new.py": full + "\n\n" + over})
+    report = _check(root, "readability")
+    assert _blocked(report) == {(LENGTH, "over")} and _lengths(report) == {"over": (27, "new")}
+    said = "`over`: its length in lines of code (the def line counted) is 27, more than 26"
+    assert [f.message for f in report.blocking] == [said]
+
+
+def test_length_findings_are_anchored_by_qualified_name(tmp_path: Path) -> None:
+    # lizard names a method without its class and a nested function outer.inner; the anchors are
+    # the syntax tree's, as before lizard, so old findings still match. A nested function's body
+    # is its own, not the body of the function around it, whose def line alone counts there.
+    method = "class K:\n    def m(self):\n" + _statements(26, " " * 8)
+    nested = "def outer():\n    def inner():\n" + _statements(26, " " * 8) + "    return inner()\n"
+    root = _repo(tmp_path, {})
+    _write(root, {f"{PKG}/new.py": method + "\n\n" + nested})
+    report = _check(root, "readability")
+    assert _blocked(report) == {(LENGTH, "K.m"), (LENGTH, "outer.inner")}
+    assert _lengths(report) == {"K.m": (27, "new"), "outer.inner": (27, "new")}
+
+
+def test_decorators_are_not_counted_and_the_lines_of_a_signature_are(tmp_path: Path) -> None:
+    # lizard starts a function at its def line, below any decorator, and counts each line of a
+    # signature spread over several with the body: 1 + 3 + 23 = 27 is over, 1 + 3 + 22 = 26 is
+    # not. A docstring, a comment and a blank line are not lines of code to it.
+    decorated = "@functools.lru_cache\n@functools.wraps(len)\ndef decorated():\n" + _statements(25)
+    spread = "def spread(\n    a,\n    b,\n):\n" + _statements(23)
+    documented = 'def documented(a):\n    """Three lines\n\n    of docstring."""\n'
+    documented += "    # a comment\n\n" + _statements(25)
+    root = _repo(tmp_path, {})
+    module = "import functools\n\n\n" + "\n\n".join((decorated, spread, documented))
+    _write(root, {f"{PKG}/new.py": module})
+    report = _check(root, "readability")
+    assert _blocked(report) == {(LENGTH, "spread")} and _lengths(report) == {"spread": (27, "new")}
+    _write(root, {f"{PKG}/new.py": module.replace(_statements(23), _statements(22))})
+    assert _check(root, "readability").passed
+
+
+def test_lizard_agrees_with_the_count_it_replaced_on_plain_bodies(tmp_path: Path) -> None:
+    # On a plain body of N statements the two counts agree, lizard's one more for the def line:
+    # here a function, an async function, a method and a nested function, for seven N. The
+    # function around the nested one is the documented exception: its def line, the nested def
+    # line and its return are 3, whatever N, where the count it replaced took the nested body too.
+    parts = []
+    for n in (1, 2, 5, 24, 25, 26, 40):
+        parts.append(f"def f{n}():\n" + _statements(n))
+        parts.append(f"async def a{n}():\n" + _statements(n))
+        parts.append(f"class C{n}:\n    def m(self):\n" + _statements(n, " " * 8))
+        inner = "    def inner():\n" + _statements(n, " " * 8) + "    return inner\n"
+        parts.append(f"def o{n}():\n" + inner)
+    source, rel = "\n\n".join(parts), f"{PKG}/plain.py"
+    _write(tmp_path, {rel: source})
+    measured = readability._lizard(tmp_path, [rel])
+    home = _home_made(source)
+    assert len(measured) == 7 * 5 == len(home)
+    for m in measured:
+        if m.name.startswith("o") and "." not in m.name:
+            assert m.value == 3 and home[m.line] == int(m.name[1:]) + 2, m.name
+        else:
+            assert m.value == home[m.line] + 1, m.name
+
+
+def test_what_lizard_leaves_out_or_would_cut_short(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A function written on its def line is not listed by lizard and holds one line of code: no
+    # finding and no refusal, as for a module that does not parse (lizard lists a function there,
+    # the syntax tree has none at its line). lizard's forgiveness comment, its generated-code
+    # marker and a line at the def's indentation after the parameters (a return annotation over
+    # several lines, which lizard takes for the function's end) are refused by name instead:
+    # nothing in the repository's files loosens the limit, and no short count is recorded.
+    fine = "def one(a): return a\n\n\ndef two(\n    a,\n): return a\n\n\n"
+    files = {f"{PKG}/fine.py": fine + "def three(a):\n    return a\n"}
+    files[f"{PKG}/broken.py"] = "def broken(a:\n    return a\n"
+    _write(tmp_path, files)
+    assert [m.name for m in readability._lizard(tmp_path, sorted(files))] == ["three"]
+    root = _repo(tmp_path, {})
+    forgiven = "def hidden(a):\n    return a\n\n\n#lizard forgive\ndef kept(a):\n    return a\n"
+    generated = "# GENERATED CODE\ndef gone(a):\n    return a\n"
+    annotated = "def cut(a) -> dict[\n    str, int\n]:\n" + _statements(30)
+    refused = {
+        "`hidden` is not listed": forgiven,
+        "`gone` is not listed": generated,
+        "`cut` has a line at its def's indentation \\(line 3\\)": annotated,
+    }
+    for said, text in refused.items():
+        _write(root, {f"{PKG}/new.py": text})
+        with pytest.raises(RuntimeError, match=f"cannot trust {PKG}/new.py: {said}"):
+            _check(root, "readability")
+    assert main(["standards", "readability", "--root", str(root), "--base", "HEAD"]) == 2
+    assert "readability: could not run: the length check cannot trust" in capsys.readouterr().out
+    # A nested function written on its def line takes lizard's place of the one around it.
+    nested = "def outer(a):\n    def inner(): ...\n\n    return inner\n"
+    _write(root, {f"{PKG}/new.py": nested})
+    with pytest.raises(RuntimeError, match="`outer` is not listed.*nested function written on"):
+        _check(root, "readability")
+    # A one-line function before a bracketed literal: lizard lists it with the literal's lines
+    # (measured 2026-10-08: 32 for a 30-line list); a function that ends on its def line is never
+    # counted, whatever lizard charged it with.
+    stubbed = "def noop(*_): ...\n\n\nX = [\n" + "".join(f"    {i},\n" for i in range(30)) + "]\n"
+    _write(tmp_path, {f"{PKG}/stub.py": stubbed})
+    assert readability._lizard(tmp_path, [f"{PKG}/stub.py"]) == []
+
+
+def test_a_shape_lizard_cannot_count_at_the_base_never_refuses_the_change_that_removes_it(
+    tmp_path: Path,
+) -> None:
+    # The base is read with the same tools, but a function lizard cannot be trusted on there is
+    # left out instead of refused: the pull request that puts the signature on one line must be
+    # able to merge, and its finding, where the function is over the limit, is new.
+    annotated = "def cut(a) -> dict[\n    str, int\n]:\n" + _statements(30)
+    root = _repo(tmp_path, {f"{PKG}/old.py": annotated})
+    _write(root, {f"{PKG}/old.py": "def cut(a) -> dict[str, int]:\n" + _statements(30)})
+    assert _lengths(_check(root, "readability")) == {"cut": (31, "new")}
+    _write(root, {f"{PKG}/old.py": "def cut(a) -> dict[str, int]:\n    return {}\n"})
     assert _check(root, "readability").passed
 
 
@@ -238,30 +417,109 @@ def test_a_deep_hierarchy_blocks(tmp_path: Path) -> None:
 
 
 def _block(name: str) -> str:
+    # Fifteen lines of about twelve of jscpd's tokens each: a clone under any floor.
     body = "".join(f"    total = total + values[{n}] * 3 - offset // {n + 2}\n" for n in range(12))
     return f"def {name}(values, offset):\n    total = 0\n{body}    return total\n"
 
 
-def test_duplication_measures() -> None:
-    line = lambda n, k: (n, k, 10)  # noqa: E731
-    a = tuple(line(n, f"k{n % 3}") for n in range(1, 13))
-    assert duplication.repeated((a,), 3, 30) != ()
-    assert duplication.repeated((a,), 3, 31) == ()
-    assert duplication.within_limit(3, 100) and not duplication.within_limit(4, 100)
+def _dense(name: str) -> str:
+    # Twelve lines of other text, as long and as dense: a different clone at the same place.
+    body = "".join(f"    total = a * {n} + b * {n + 1} - c / {n + 2}\n" for n in range(10))
+    return f"def {name}(a, b, c):\n{body}    return total\n"
 
 
-def test_copied_new_code_blocks_and_copies_the_base_held_do_not(tmp_path: Path) -> None:
-    root = _repo(tmp_path, {})
-    _write(root, {f"{PKG}/copies.py": _block("first") + "\n\n" + _block("second")})
-    report = _check(root, "duplication")
-    assert not report.passed and report.blocking
-    assert report.blocking[0].message.startswith("lines ")
+# The function the token-window detector let through on 2026-10-08: 13 lines holding 57 of
+# jscpd's tokens (4.4 a line) against its floor of 100. The first ten lines hold 48, fewer than
+# jscpd's own default floor of 50.
+SPARSE = """\
+def NAME(items):
+    total = 0
+    for item in items:
+        if item is None:
+            continue
+        total += int(item) * 3 + 1
+        if total > 1000:
+            total -= 500
+        elif total < -1000:
+            total += 500
+        else:
+            total = total % 997
+    return total
+"""
 
+# Twelve lines of two or three tokens each, 35 in all: under the floor, so not a clone.
+COLUMN = "def NAME():\n" + "".join(f"    value_{n} = {n}\n" for n in range(10)) + "    return 0\n"
+
+COPIES = {f"{PKG}/copies.py": _block("first") + "\n\n" + _block("second")}
+SMALL = {f"{PKG}/other.py": "def small(x):\n    return x\n"}
+
+
+def _pair(text: str, tail_a: str = "", tail_b: str = "") -> dict[str, str]:
+    # ``text`` once per file, under two function names, each file with its own ending.
+    return {
+        f"{PKG}/a.py": text.replace("NAME", "first") + tail_a,
+        f"{PKG}/b.py": text.replace("NAME", "second") + tail_b,
+    }
+
+
+def _commit_all(root: Path, message: str) -> None:
     _git(root, "add", "-A")
-    _git(root, "commit", "-q", "-m", "copies")
-    _write(root, {f"{PKG}/other.py": "def small(x):\n    return x\n"})
+    _git(root, "commit", "-q", "-m", message)
+
+
+def test_duplication_measures() -> None:
+    assert duplication.within_limit(3, 100) and not duplication.within_limit(4, 100)
+    lines = frozenset(range(1, 21))
+    assert duplication.in_blocks(lines, ((5, 8), (30, 40))) == frozenset({5, 6, 7, 8})
+    assert duplication.in_blocks(lines, ()) == frozenset()
+
+
+def test_copied_new_code_blocks_and_a_clone_the_base_held_is_unchanged(tmp_path: Path) -> None:
+    root = _repo(tmp_path, {})
+    _write(root, COPIES)
     report = _check(root, "duplication")
-    assert report.passed and not report.runs[0].findings, report.summary
+    assert not report.passed and "30 of 30 new lines" in report.summary
+    assert [(f.line, f.end_line, f.value) for f in report.blocking] == [(1, 15, 15), (18, 32, 15)]
+    where = f"lines 1-15 repeat a block also found at {PKG}/copies.py:18, 15 of them new"
+    assert report.blocking[0].message == where and set(_states(report).values()) == {"new"}
+    (run,) = report.runs
+    assert run.tool == "jscpd" and run.version.count(".") == 2, run.version
+
+    _commit_all(root, "copies")
+    _write(root, SMALL)
+    report = _check(root, "duplication")
+    assert report.passed and not report.blocking, report.summary
+    assert set(_states(report).values()) == {"unchanged"}
+    assert [f.level for f in report.runs[0].findings] == ["warning", "warning"]
+
+    # The two names swapped: the two changed lines both lie in a clone the base held, which is the
+    # same clone (the same text, copied from the same file) now holding new lines.
+    _write(root, {f"{PKG}/copies.py": _block("second") + "\n\n" + _block("first")})
+    report = _check(root, "duplication")
+    assert not report.passed and "2 of 4 new lines" in report.summary  # with other.py's two
+    assert set(_states(report).values()) == {"updated"} and len(report.blocking) == 2
+
+
+def test_the_old_copy_of_a_block_newly_copied_is_recorded_and_does_not_block(
+    tmp_path: Path,
+) -> None:
+    root = _repo(tmp_path, COPIES)
+    _write(root, {f"{PKG}/third.py": _block("third")})
+    report = _check(root, "duplication")
+    assert not report.passed and "15 of 15 new lines" in report.summary
+    assert {(f.path, f.line) for f in report.blocking} == {(f"{PKG}/third.py", 1)}
+    # The old blocks' own clone is unchanged; the first of them, which jscpd pairs the new copy
+    # with (each copy is paired with the first it saw), is new to the record and an error to no one.
+    recorded = {
+        (f.path, f.line, f.level, s)
+        for f, s in zip(report.runs[0].findings, report.runs[0].states, strict=True)
+        if f.path == f"{PKG}/copies.py"
+    }
+    assert recorded == {
+        (f"{PKG}/copies.py", 1, "warning", "unchanged"),
+        (f"{PKG}/copies.py", 18, "warning", "unchanged"),
+        (f"{PKG}/copies.py", 1, "warning", "new"),
+    }
 
 
 def test_a_block_with_its_names_changed_is_not_a_copy(tmp_path: Path) -> None:
@@ -269,6 +527,138 @@ def test_a_block_with_its_names_changed_is_not_a_copy(tmp_path: Path) -> None:
     other = _block("second").replace("total", "acc")
     _write(root, {f"{PKG}/copies.py": _block("first") + "\n\n" + other})
     assert _check(root, "duplication").passed
+
+
+def test_the_floor_finds_ten_sparse_lines_and_not_a_column(tmp_path: Path) -> None:
+    root = _repo(tmp_path, {})
+    _write(root, _pair(SPARSE))
+    report = _check(root, "duplication")
+    assert not report.passed
+    assert {(f.path, f.line, f.end_line) for f in report.blocking} == {
+        (f"{PKG}/a.py", 1, 13),
+        (f"{PKG}/b.py", 1, 13),
+    }
+
+    # Its first ten lines, each copy ending in its own way (jscpd may count the line where the
+    # copies part as the block's last).
+    ten = "\n".join(SPARSE.splitlines()[:10]) + "\n"
+    _write(root, _pair(ten, "    return total\n", "    raise ValueError(total)\n"))
+    report = _check(root, "duplication")
+    assert not report.passed and len(report.blocking) == 2
+    assert all(f.line == 1 and f.end_line in (10, 11) for f in report.blocking)
+
+    # Under the floor: too few tokens in twelve lines, then too few lines however dense.
+    _write(root, _pair(COLUMN))
+    report = _check(root, "duplication")
+    assert report.passed and not report.runs[0].findings, report.summary
+    nine = "\n".join(_block("NAME").splitlines()[:9]) + "\n"
+    _write(root, _pair(nine, "    return 1\n", "    raise ValueError(total)\n"))
+    report = _check(root, "duplication")
+    assert report.passed and not report.runs[0].findings, report.summary
+
+
+def test_imports_and_docstrings_are_compared_with_nothing_and_counted_as_nothing(
+    tmp_path: Path,
+) -> None:
+    # Twenty-two import lines (47 tokens) and a thirteen-line docstring: a clone each, were they
+    # compared; and the only lines of code are the two assignments.
+    imports = "from pkg.other import (\n" + "".join(f"    name_{n},\n" for n in range(20)) + ")\n"
+    prose = "".join(f"Line {n} of the docstring, with a few words on it.\n" for n in range(11))
+    doc = f'"""A module.\n{prose}"""\n'
+    root = _repo(tmp_path, {})
+    _write(root, {f"{PKG}/a.py": doc + imports + "\nA = 1\n"})
+    _write(root, {f"{PKG}/b.py": doc + imports + "\nB = 2\n"})
+    report = _check(root, "duplication")
+    assert report.passed and not report.runs[0].findings, report.summary
+    assert "0 of 2 new lines" in report.summary
+
+
+def test_the_ignore_marker_is_refused_and_hides_nothing(tmp_path: Path) -> None:
+    start, end = f"# {duplication.MARKER}-start\n", f"# {duplication.MARKER}-end\n"
+    marked = {f"{PKG}/marked.py": start + _block("first") + end + "\n\n" + _block("second")}
+    root = _repo(tmp_path, {})
+    _write(root, marked)
+    report = _check(root, "duplication")
+    assert not report.passed and "2 comments hold" in report.summary
+    assert {(f.rule, f.line) for f in report.blocking} == {
+        (duplication.IGNORE.id, 1),
+        (duplication.IGNORE.id, 17),
+        (duplication.RULE.id, 2),
+        (duplication.RULE.id, 20),
+    }
+    assert _states(report)[(duplication.IGNORE.id, start.strip())] == "new"
+
+    # A string holding the text is not a comment: defused for jscpd, which would otherwise read it
+    # there too, and not refused.
+    strung = f'TEXT = "{duplication.MARKER}-start"\n' + _block("first") + "\n\n" + _block("second")
+    _write(root, {f"{PKG}/marked.py": strung})
+    report = _check(root, "duplication")
+    rules = {(f.rule, f.line) for f in report.blocking}
+    assert rules == {(duplication.RULE.id, 2), (duplication.RULE.id, 19)}
+
+    # A marker the base held is unchanged and does not block, and the clone behind it is seen.
+    _write(root, marked)
+    _commit_all(root, "marked")
+    _write(root, SMALL)
+    report = _check(root, "duplication")
+    assert report.passed and set(_states(report).values()) == {"unchanged"}
+    assert len(report.runs[0].findings) == 4
+
+
+def test_a_clone_replaced_by_another_between_the_same_files_is_new(tmp_path: Path) -> None:
+    # The anchor is the other file and the text copied, so a clone of different text at the same
+    # place reads as new; an anchor of the other file alone would call it updated.
+    root = _repo(tmp_path, {})
+    _write(root, COPIES)
+    _commit_all(root, "copies")
+    _write(root, {f"{PKG}/copies.py": _dense("one") + "\n\n" + _dense("two")})
+    report = _check(root, "duplication")
+    assert not report.passed and set(_states(report).values()) == {"new"}, _states(report)
+    assert [f.line for f in report.blocking] == [1, 15]
+
+
+def test_a_copy_is_cut_by_jscpd_s_byte_columns() -> None:
+    # Measured 2026-10-08: jscpd reports the column of a copy's first and last character as the
+    # byte offset in the line's UTF-8, so on a line holding non-ASCII text before the copy the
+    # character index is smaller; the anchor's text must still be the copy's.
+    staged = 'xa = "\u00e9\u00e9\u00e9\u00e9\U0001f600"; total = 0\ntotal += 1\n'
+    side = duplication._Side.model_validate(
+        {
+            "name": "x.py",
+            "start": 1,
+            "end": 2,
+            "startLoc": {"line": 1, "column": 19},
+            "endLoc": {"line": 2, "column": 10},
+        }
+    )
+    assert duplication._copied(side, staged) == "; total = 0\ntotal += 1"
+    assert duplication._copied(side, "") == ""
+
+
+def test_a_jscpd_configuration_file_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Were it read, the file would ignore the copies, set the floors out of reach and allow 100%.
+    # jscpd reads .jscpd.json, .config/jscpd.json and package.json from its working directory
+    # only (measured 2026-10-08), so the test runs from the root that holds one: the group starts
+    # jscpd from an empty directory of its own, never from the directory it was started in.
+    config = json.dumps(
+        {
+            "threshold": 100,
+            "ignore": ["**/copies.py"],
+            "minTokens": 100000,
+            "min_tokens": 100000,
+            "minLines": 1000,
+            "min_lines": 1000,
+            "mode": "strict",
+        }
+    )
+    planted = {".jscpd.json": config, "src/.jscpd.json": config, f"{PKG}/.jscpd.json": config}
+    root = _repo(tmp_path, planted)
+    _write(root, COPIES)
+    monkeypatch.chdir(root)
+    report = _check(root, "duplication")
+    assert not report.passed and [f.line for f in report.blocking] == [1, 18]
 
 
 # --- coverage -----------------------------------------------------------------------------------
@@ -350,9 +740,40 @@ def test_a_weakness_the_base_held_is_recorded_and_passes(tmp_path: Path) -> None
 
 
 def test_security_levels() -> None:
-    assert security.level_for("HIGH", "MEDIUM") == "error"
-    assert security.level_for("MEDIUM", "LOW") == "note"
-    assert security.level_for("LOW", "HIGH") == "note"
+    grade = security.Grade
+    assert security.level_for(grade.HIGH, grade.MEDIUM) == "error"
+    assert security.level_for(grade.MEDIUM, grade.LOW) == "note"
+    assert security.level_for(grade.LOW, grade.HIGH) == "note"
+    # Every pair, against bandit's ranking written out rather than the module's own constant,
+    # which the postcondition restates: the four blocking pairs and no other.
+    blocking = {
+        (grade.MEDIUM, grade.MEDIUM),
+        (grade.MEDIUM, grade.HIGH),
+        (grade.HIGH, grade.MEDIUM),
+        (grade.HIGH, grade.HIGH),
+    }
+    for severity in grade:
+        for confidence in grade:
+            expected = "error" if (severity, confidence) in blocking else "note"
+            assert security.level_for(severity, confidence) == expected, (severity, confidence)
+    # The callers pass the member; bandit's string is validated into it at the boundary, once.
+    spelled: Any = "HIGH"
+    with pytest.raises(BeartypeCallHintParamViolation):
+        security.level_for(spelled, grade.HIGH)
+    raw = {
+        "filename": "a.py",
+        "line_number": 1,
+        "line_range": [1],
+        "test_id": "B101",
+        "test_name": "assert_used",
+        "issue_severity": "HIGH",
+        "issue_confidence": "LOW",
+        "issue_text": "x",
+    }
+    issue = security._Issue.model_validate(raw)
+    assert issue.issue_severity is grade.HIGH and issue.issue_confidence is grade.LOW
+    with pytest.raises(ValidationError):
+        security._Issue.model_validate({**raw, "issue_severity": "SEVERE"})
 
 
 # --- supply chain -------------------------------------------------------------------------------
@@ -370,10 +791,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@{SHA}
+        with:
+          persist-credentials: false
       - uses: ./local-action
       - run: echo "$TITLE"
         env:
           TITLE: ${{{{ github.event.issue.title }}}}
+      - run: |
+          curl -fsSL -o "$RUNNER_TEMP/tool" https://example.invalid/tool
+          echo "{"0" * 64}  $RUNNER_TEMP/tool" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/tool"
 """
 
 BAD = """\
@@ -391,9 +818,35 @@ jobs:
       - name: greet
         run: echo "${{ github.event.pull_request.title }}"
       - run: curl -fsSL https://example.invalid/install.sh | sudo bash
+      - run: |
+          wget -q https://example.invalid/tool.tgz
+          tar xzf tool.tgz && ./tool --version
   reuse:
     uses: some/repo/.github/workflows/x.yml@main
 """
+
+# A third party's action and an install outside a lockfile, with zizmor told to look away in every
+# way it accepts: an inline comment (held in a string, which the gate's check, a reader of
+# comments, never sees, so it is written out), and an ignore rule in both places a configuration
+# file lives.
+LOOK_AWAY_COMMENT = "# zizmor: ignore[unpinned-uses]"
+THIRD = f"""\
+name: third
+on: [push]
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@{SHA}
+        with:
+          persist-credentials: false
+      - uses: someone/thing@v1 {LOOK_AWAY_COMMENT}
+      - run: npm install -g foo
+"""
+LOOK_AWAY = "rules:\n  unpinned-uses:\n    ignore:\n      - third.yml\n"
+LOOK_AWAY += "  adhoc-packages:\n    ignore:\n      - third.yml\n"
 
 
 def test_supply_chain_rules() -> None:
@@ -405,8 +858,77 @@ def test_supply_chain_rules() -> None:
     assert not supply_chain.grants_write({"a": "read"}) and not supply_chain.grants_write(None)
     script = 'echo "${{ github.head_ref }}" ${{ github.sha }}'
     assert supply_chain.untrusted(script) == (" github.head_ref ",)
-    assert supply_chain.pipes_to_shell("wget -qO- x | sh")
-    assert not supply_chain.pipes_to_shell("curl x > f")
+    assert supply_chain.level_for("High") == supply_chain.level_for("Medium") == "error"
+    assert supply_chain.level_for("Low") == supply_chain.level_for("Informational") == "note"
+
+
+def test_a_download_handed_to_a_shell_or_an_interpreter_is_refused() -> None:
+    # Piped into one, through wrappers, with a quoted `&` that separates nothing; substituted into
+    # its command line as $(...) or <(...); on a line continued after the pipe. Not: written to a
+    # file, piped into something that only reads, or named in a comment.
+    handed = (
+        "wget -qO- x | sh",
+        'curl -fsSL "https://x.invalid/a?b=1&c=2" | sudo -E env A=1 /bin/bash',
+        "curl -s https://x.invalid/i.py | python3 -",
+        "curl -fsSL https://example.invalid/install.sh | sudo bash",
+        "curl -fsSL https://x.invalid/i.sh |\n  sh -s -- --yes",
+        "bash <(curl -fsSL https://x.invalid/i.sh)",
+        'bash -c "$(curl -fsSL https://x.invalid/i.sh)"',
+        'eval "$(wget -qO- https://x.invalid/env.sh)"',
+    )
+    kept = (
+        "curl x > f",
+        "curl -s https://x.invalid/v.json | jq .tag",
+        "curl -o f https://x.invalid/f && bash f",
+        "wget -O - https://x.invalid/i | tee i.sh",
+        "echo 'curl x | sh' # a comment",
+    )
+    assert all(supply_chain.pipes_to_shell(s) for s in handed)
+    assert not any(supply_chain.pipes_to_shell(s) for s in kept)
+
+
+def test_a_download_the_job_goes_on_to_use_needs_a_digest_check_first() -> None:
+    fetch = 'curl -fsSL -o /usr/local/bin/pixi \\\n  "https://example.invalid/v${V}/pixi"\n'
+    use = "chmod 0755 /usr/local/bin/pixi\npixi --version\n"
+    digest = "0" * 64
+    check = f'echo "{digest}  /usr/local/bin/pixi" | sha256sum -c -\n'
+    unchecked = (
+        fetch + use,
+        "wget https://example.invalid/a.tgz\ntar xzf a.tgz\n",  # wget's own name for the file
+        "curl -O https://example.invalid/a.sh && bash a.sh\n",  # curl's remote name
+        "curl -fsSL https://x.invalid/t > t && chmod +x t && ./t\n",  # a redirection
+        "curl -fsSL https://x.invalid/i.sh | tee i.sh && bash i.sh\n",  # tee makes the file
+        "curl -fsSL https://x.invalid/a.tgz | tar xz\n",  # a stream into an unpacker
+        fetch + f"# {digest}  /usr/local/bin/pixi\n" + use,  # a digest in a comment
+        fetch + use + check,  # checked after the use
+        fetch + f'echo "{digest}  other" | sha256sum -c -\n' + use,  # another file checked
+        fetch + check.replace("\n", " || true\n") + use,  # the check's failure thrown away
+        # A file fetched and copied beside the commands; a data file copied elsewhere is left.
+        "curl -o data.json x\ncp data.json /usr/local/bin/tool\n",
+    )
+    assert all(supply_chain.unchecked_download(s) for s in unchecked)
+    checked = (
+        fetch,  # fetched and left alone
+        fetch + check + use,
+        fetch + 'echo "$PIXI_SHA256  /usr/local/bin/pixi" | sha256sum --status --check -\n' + use,
+        fetch
+        + f'test "$(sha256sum /usr/local/bin/pixi | cut -c1-64)" = {digest} || exit 1\n'
+        + use,
+        fetch + check.replace("\n", " || { rm -f /usr/local/bin/pixi; exit 1; }\n") + use,
+        "curl -o data.json https://x.invalid/d.json\ncat data.json\ncp data.json out/\n",
+        "curl -o data.json https://x.invalid/d.json\n/tmp/pixi install --locked\n./run-tests.sh\n",
+        # A download piped into a shell is the pipe rule's; a pipe to stdout fetches no file.
+        "curl -fsSL https://example.invalid/i.sh | sh\n",
+        "wget -qO- https://example.invalid/i.sh | sh\n",
+        "wget -O - https://example.invalid/i | bash\n",
+        "curl -s https://x.invalid/v.json | jq .tag\n",
+    )
+    assert not any(supply_chain.unchecked_download(s) for s in checked)
+    # The steps after the fetching one in its job: a use there is a use, a check there a check,
+    # and a fetch there is that step's own.
+    assert supply_chain.unchecked_download(fetch, use)
+    assert not supply_chain.unchecked_download(fetch, check + use)
+    assert not supply_chain.unchecked_download("", "curl -o t x\nchmod +x t\n")
 
 
 def test_workflows_are_held_to_scorecards_checks(tmp_path: Path) -> None:
@@ -414,15 +936,148 @@ def test_workflows_are_held_to_scorecards_checks(tmp_path: Path) -> None:
     _write(root, {".github/workflows/good.yml": GOOD, ".github/workflows/bad.yaml": BAD})
     report = _check(root, "supply-chain")
     assert not report.passed
-    found = {(f.path.rsplit("/", 1)[-1], f.rule.split("/")[1], f.line) for f in report.blocking}
-    assert found == {
-        ("bad.yaml", "token-permissions", 4),
-        ("bad.yaml", "pinned-action", 9),
-        ("bad.yaml", "untrusted-checkout", 11),
-        ("bad.yaml", "script-injection", 13),
-        ("bad.yaml", "pipe-to-shell", 14),
-        ("bad.yaml", "pinned-action", 16),
+    found = {(f.path.rsplit("/", 1)[-1], f.rule, f.line) for f in report.blocking}
+    assert {f for f in found if f[1].startswith("supply-chain/")} == {
+        ("bad.yaml", "supply-chain/token-permissions", 4),
+        ("bad.yaml", "supply-chain/pinned-action", 9),
+        ("bad.yaml", "supply-chain/untrusted-checkout", 11),
+        ("bad.yaml", "supply-chain/script-injection", 13),
+        ("bad.yaml", "supply-chain/pipe-to-shell", 14),
+        ("bad.yaml", "supply-chain/unchecked-download", 16),
+        ("bad.yaml", "supply-chain/pinned-action", 19),
     }
+    # zizmor's own reading of the same file, each at the line of its primary location, Medium and
+    # High both errors; good.yml gives it nothing above Low.
+    assert {f for f in found if f[1].startswith("zizmor/")} == {
+        ("bad.yaml", "zizmor/dangerous-triggers", 2),
+        ("bad.yaml", "zizmor/excessive-permissions", 4),
+        ("bad.yaml", "zizmor/artipacked", 9),
+        ("bad.yaml", "zizmor/unpinned-uses", 9),
+        ("bad.yaml", "zizmor/template-injection", 13),
+        ("bad.yaml", "zizmor/unpinned-uses", 19),
+    }
+    reader, audits = report.runs
+    assert (reader.tool, audits.tool) == ("beethoven-qa", "zizmor")
+    assert re.fullmatch(r"\d+\.\d+\.\d+", audits.version), audits.version
+
+
+TWO_STEPS = f"""\
+name: two
+on: [push]
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@{SHA}
+        with:
+          persist-credentials: false
+      - name: fetch
+        run: curl -fsSL -o "$RUNNER_TEMP/tool" https://example.invalid/tool
+      - name: use
+        run: |
+          chmod +x "$RUNNER_TEMP/tool"
+          "$RUNNER_TEMP/tool" --version
+"""
+
+
+def test_a_download_a_later_step_of_the_job_uses_is_the_fetching_steps_finding(
+    tmp_path: Path,
+) -> None:
+    root = _repo(tmp_path, {})
+    _write(root, {".github/workflows/two.yml": TWO_STEPS})
+    report = _check(root, "supply-chain")
+    ours = [f for run in report.runs for f in run.findings if f.rule.startswith("supply-chain/")]
+    assert [(f.rule, f.line) for f in ours] == [("supply-chain/unchecked-download", 13)]
+    needle = 'curl -fsSL -o "$RUNNER_TEMP/tool" https://example.invalid/tool'
+    assert ours[0].anchor == f"j/fetch: {needle}"
+    # A check in a step between them clears it.
+    check = f'      - run: echo "{"0" * 64}  $RUNNER_TEMP/tool" | sha256sum -c -\n'
+    _write(
+        root,
+        {
+            ".github/workflows/two.yml": TWO_STEPS.replace(
+                "      - name: use\n", check + "      - name: use\n"
+            )
+        },
+    )
+    report = _check(root, "supply-chain")
+    assert not [
+        f for run in report.runs for f in run.findings if f.rule.startswith("supply-chain/")
+    ]
+
+
+def test_zizmor_is_read_at_the_regular_persona_and_nothing_tells_it_to_look_away(
+    tmp_path: Path,
+) -> None:
+    files = {"zizmor.yml": LOOK_AWAY, ".github/zizmor.yml": LOOK_AWAY}
+    root = _repo(tmp_path, files)
+    _write(root, {".github/workflows/third.yml": THIRD})
+    report = _check(root, "supply-chain")
+    assert not report.passed
+    # The reader refuses the tag too; zizmor's own reading sits beside it.
+    rules = [f.rule for f in report.blocking]
+    assert rules == ["supply-chain/pinned-action", "zizmor/unpinned-uses"]
+    stop = report.blocking[1]
+    assert (stop.rule, stop.line, stop.level) == ("zizmor/unpinned-uses", 12, "error")
+    assert stop.anchor == f"- uses: someone/thing@v1 {LOOK_AWAY_COMMENT}"
+    assert "action is not pinned to a hash" in stop.message and "high severity" in stop.message
+    audits = report.runs[1]
+    notes = [f for f in audits.findings if f.level == "note"]
+    assert [(f.rule, f.line) for f in notes] == [("zizmor/adhoc-packages", 13)]  # recorded only
+    rule = next(r for r in audits.rules if r.id == "zizmor/adhoc-packages")
+    assert rule.help_uri == "https://docs.zizmor.sh/audits/#adhoc-packages"
+    log = json.loads(json.dumps(sarif_log(report.runs)))
+    validate_sarif(log)
+    result = log["runs"][1]["results"][0]
+    assert result["locations"][0]["physicalLocation"]["region"]["startLine"] == 12
+    # Committed, moved down a line, the finding is the base's and passes.
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "third")
+    _write(root, {".github/workflows/third.yml": "# moved down\n" + THIRD})
+    report = _check(root, "supply-chain")
+    assert report.passed
+    assert _states(report)[("zizmor/unpinned-uses", stop.anchor)] == "unchanged"
+
+
+def test_a_zizmor_that_fails_fails_the_group_in_its_own_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path, {})
+    _write(root, {".github/workflows/good.yml": GOOD})
+    stub = tmp_path / "zizmor"
+    stub.write_text("#!/bin/sh\necho 'boom' >&2\nexit 1\n", encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setattr(supply_chain, "_bin", lambda name: str(stub))
+    with pytest.raises(RuntimeError, match="zizmor failed: boom"):
+        _check(root, "supply-chain")
+
+
+def test_a_file_zizmor_cannot_read_as_a_workflow_is_passed_over(tmp_path: Path) -> None:
+    # The reader passes over what does not parse as a mapping; zizmor, told so by its own exit,
+    # collected nothing, which is no finding and no failure.
+    root = _repo(tmp_path, {})
+    _write(root, {".github/workflows/notes.yml": "- not a workflow\n"})
+    report = _check(root, "supply-chain")
+    assert report.passed and all(not run.findings for run in report.runs)
+
+
+def test_this_repositorys_own_workflows_pass_the_reader_and_zizmor() -> None:
+    # Every finding new (no base): the tree passes only if nothing of error level is in it. The
+    # one note is zizmor's Low for the npm install of the Claude Code CLI, which has no lockfile
+    # to pin it (recorded, accepted; supply_chain's docstring).
+    context = Context(REPO, None, "src/beethoven_qa", Changes((), (), True))
+    report = supply_chain._check(context)
+    assert report.passed, report.summary
+    recorded = {(f.rule, f.level) for run in report.runs for f in run.findings}
+    assert recorded == {("zizmor/adhoc-packages", "note")}
+    # The hook is no workflow, so the reader never sees it; its download keeps the rule anyway,
+    # and the rule sees the download: with its digest line gone, the same script is refused.
+    hook = (REPO / ".claude" / "hooks" / "session-start.sh").read_text(encoding="utf-8")
+    assert not supply_chain.unchecked_download(hook) and not supply_chain.pipes_to_shell(hook)
+    unchecked = "\n".join(line for line in hook.splitlines() if "sha256sum" not in line)
+    assert supply_chain.unchecked_download(unchecked)
 
 
 def test_a_workflow_with_no_permissions_is_reported_where_its_jobs_start(tmp_path: Path) -> None:
@@ -573,7 +1228,10 @@ def test_a_workflow_edit_is_held_to_the_supply_chain_group(
     edited = str(root / ".github/workflows/bad.yaml")
     told = json.loads(_coached(root, edited, monkeypatch, capsys))["reason"]
     said = [line for line in told.splitlines() if line.startswith("  .github/workflows/bad.yaml:")]
-    assert len(said) == 6 and "supply-chain/pinned-action" in told and " more" not in told
+    # The reader's seven and zizmor's six: one over the answer's cap, so twelve are said and the
+    # last is counted.
+    assert len(said) == 12 and "supply-chain/pinned-action" in told and "and 1 more" in told
+    assert "zizmor/template-injection" in told
 
 
 def test_coaching_says_nothing_when_it_cannot_or_should_not(

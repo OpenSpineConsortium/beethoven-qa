@@ -21,15 +21,34 @@ Anthropic's marks, used here to say what it runs.
 
 | Group | What blocks a change | Limit and where it comes from | Tool (from the lock) |
 | - | - | - | - |
-| `readability` | a function over a limit | cognitive complexity 15 (Campbell, SonarSource S3776); cyclomatic complexity 10 (McCabe, 1976); 4 parameters, `self` and `cls` not counted, and 25 lines of code in a body (Code Climate's defaults) | complexipy, ruff (C901, PLR0913), and a count of lines of code here |
+| `readability` | a function over a limit | cognitive complexity 15 (Campbell, SonarSource S3776); cyclomatic complexity 10 (McCabe, 1976); 4 parameters, `self` and `cls` not counted, and 25 lines of code in a body (Code Climate's defaults), which is 26 as lizard counts them (its NLOC takes the `def` line and each line of the signature with the body) | complexipy, ruff (C901, PLR0913) and lizard (NLOC) |
 | `design` | a class over a limit | WMC 50, NOC 10, RFC 50 (chosen here); DIT 5 (the Drive file); CBO 14 (Sahraoui, Boukadoum and Lounis, 2000); LCOM4 1 (Hitz and Montazeri, 1995) | the Chidamber and Kemerer suite computed here from the syntax tree, McCabe weights from radon |
-| `duplication` | more than 3% of the new lines in a copied block | Sonar way: duplicated lines on new code at most 3%; a block is 10 lines and 100 tokens | a token-level detector here |
+| `duplication` | more than 3% of the new lines in a copied block, or a comment holding `jscpd:ignore` | Sonar way: duplicated lines on new code at most 3%; a block is 10 lines (SonarSource's own) holding 40 of jscpd's tokens (derived below) | jscpd |
 | `coverage` | less than 80% of the new lines that can run are run by the tests | Sonar way: coverage on new code at least 80% (line coverage) | coverage.py over the repository's own tests |
 | `security` | a new weakness of medium or high severity found with medium or high confidence | Sonar way: no new vulnerability; each finding carries its CWE (the catalogue ISO/IEC 5055 builds on) | bandit |
-| `supply-chain` | a workflow that breaks one of OpenSSF Scorecard's file checks | Pinned-Dependencies (actions by full commit, no download piped into a shell), Token-Permissions (top-level permissions grant no write), Dangerous-Workflow (no checkout of a pull request's code under `pull_request_target` or `workflow_run`, no outsider-controlled expression in a `run` script) | a reader of `.github/workflows/*.yml` here |
+| `supply-chain` | a workflow that breaks one of OpenSSF Scorecard's file checks, or gets a High or Medium finding from zizmor | Pinned-Dependencies (actions by full commit, no download piped into a shell, no download that the step runs, installs, unpacks or chmods without a sha256 check), Token-Permissions (top-level permissions grant no write), Dangerous-Workflow (no checkout of a pull request's code under `pull_request_target` or `workflow_run`, no outsider-controlled expression in a `run` script); zizmor's audits at its regular persona (its Low and Informational findings are recorded, never blocking) | a reader of `.github/workflows/*.yml` here, and zizmor |
 
 Each module's docstring gives the exact definitions (what a line of code is, which methods LCOM4
 joins, which GitHub contexts are untrusted) and every limit's source.
+
+The duplication group's token floor is this package's own derivation. SonarSource's block is 10
+lines and 100 tokens, which assumes about ten tokens a line, and Python has fewer: measured on
+2026-10-08 with jscpd 5.4.0 on this package, 7.4 of jscpd's tokens a line (40946 over 5569 lines,
+blank and comment lines among them), so a 10-line copy of average code holds about 74, while the
+13-line function that 4.0.0's token-window detector let through (its floor was 100 of its own
+tokens) holds 57, 48 in its first ten lines. So jscpd runs with `--min-lines 10 --min-tokens 40`:
+a 10-line copy of ordinary code is a clone (those ten lines are one; jscpd's own default of 50
+would miss them), a column of assignments or literals is not (ten `name = value` lines hold 30),
+and both must hold, so nine dense lines in a row are not one either. jscpd counts a clone's lines
+from its first token's line to its last token's, so the lines between count whatever they hold:
+blank ones, and the ones a docstring or an import held before the staging blanked them (measured,
+below). Imports and docstrings are compared with nothing and their tokens are counted as nothing,
+as before (compared, this package's two pairs of identical
+import blocks, 11 and 15 lines at 40 and 42 tokens, would be its only clones): jscpd reads a
+staged copy of the package's files with those lines blank, in its weak mode (comments set aside),
+and every module is compared with every other and with itself. A clone the base already held is
+`unchanged` and blocks nothing; when the density is over the limit, the copies that hold new lines
+block, and the other copy of a block newly copied is in the record as new, an error to no one.
 
 ## Only the new code blocks
 
@@ -67,9 +86,18 @@ The tools run as their own processes from an empty directory with every setting 
 line, and their suppression comments are not honoured: ruff `--isolated --ignore-noqa`, bandit
 `--ignore-nosec` with `--ini` naming an empty section, complexipy `--no-ignore`, coverage.py with a
 configuration file of its own whose exclusion pattern matches nothing (so `# pragma: no cover`
-leaves no line out). A `# noqa`, a `# nosec`, a `.bandit` file, a `ruff.toml`, a
-`[tool.complexipy]` table or a `complexipy.toml` changes nothing (`tests/test_standards_groups.py`
-pins each). There is no `[tool.beethoven-qa]` key for the standards: a limit changes only in a
+leaves no line out), jscpd over a staged copy of the package's files in which its `jscpd:ignore`
+marker is defused, since it has no flag to ignore the marker and reads it wherever the text stands
+(a string literal and a docstring among the places; a comment holding the marker is an error
+finding of its own rule, `duplication/ignore-marker`, and a string holding it is not), zizmor
+`--no-ignores --no-config` (an inline `# zizmor: ignore[...]` is reported like any other finding,
+and a `zizmor.yml` or `.github/zizmor.yml`, which could also loosen an audit's policy, is never
+read). A `# noqa`, a `# nosec`, a `# jscpd:ignore-start`, a `.bandit` file, a `ruff.toml`, a
+`.jscpd.json`, a `[tool.complexipy]` table, a `complexipy.toml` or a zizmor ignore changes nothing
+(`tests/test_standards_groups.py` pins each), and the gate refuses every such comment outright, in
+the package and where pytest collects, with its file and line, along with a test skipped or expected to fail
+(a string that spells one is no finding). There is no `[tool.beethoven-qa]` key for the standards:
+a limit changes only in a
 release of beethoven-qa, reviewed like any other change. The coverage group runs the repository's
 tests as the repository runs them (`pytest` from its root, its own pytest settings); if they fail
 under coverage, the group fails and says so.
@@ -95,9 +123,26 @@ The `gate` task runs `standards` after the other lanes, so the pre-push hook hol
 them. In CI the kit's `.github/workflows/standards.yml` runs one job per group (`standards /
 <group>`) and one job, `standards (every group green)`, which is green only when every group's is:
 that one is the required check in `.github/rulesets/main.json`, so a group added in a later release
-needs no change to the rule. The SARIF logs are kept as artifacts of the run for 30 days. Nothing
-is uploaded to GitHub's code scanning: on a private repository it needs GitHub Code Security, which
-is not bought.
+needs no change to the rule. The SARIF logs are kept as artifacts of the run for 30 days (the
+supply-chain log holds two runs, the reader's and zizmor's). Nothing is uploaded to GitHub's code
+scanning: on a private repository it needs GitHub Code Security, which is not bought. The evidence
+report (`docs/REPORT.md`) runs the `standards` task with `--sarif` and counts each log's results
+by level and by `baselineState`, beside the tools the log names.
+
+The same file has one job more, `scorecard (report)`, which runs OpenSSF Scorecard 5.5.0 over the
+checked-out tree (`--local`), prints the scores in its log and keeps the JSON as an artifact. It is
+not among the jobs the required check waits for and the ruleset does not name it: it reports, and
+blocks nothing. Why only a report: Scorecard scores whatever we do the two things this repository
+accepts with open eyes, the `npm install -g` of the Claude Code CLI, which has no lockfile to pin
+it (Pinned-Dependencies 8 of 10 on 2026-10-08, the one warning), and the pixi download-then-run,
+which the reader now holds to a digest check where a digest exists (pixi publishes none, so the
+digest is this repository's own measurement, written beside the download); and most of its other
+file checks look for what this repository does not have by design (a licence file on a private
+repository, a Dependabot configuration, a SAST service, fuzzing, a security policy, a publishing
+workflow). The checks that ask GitHub's API (Branch-Protection, CI-Tests, CII-Best-Practices,
+Code-Review, Contributors, Maintained, Signed-Releases) refuse a local tree and are not run. The
+job installs no pixi environment: Binary-Artifacts counts the environment's binaries as artifacts
+of the repository (measured 2026-10-08).
 
 ## For a session writing code
 
@@ -139,7 +184,7 @@ hooks unless the plugin is force-enabled in the managed `enabledPlugins` (the ho
 - **Scorecard's other checks** (branch protection, code review, signed releases, a security policy
   and others) read GitHub's settings, not files. This project requires no human review by design
   (greg, 2026-10-04: the checks alone decide); its branch rule is code in
-  `.github/rulesets/main.json`.
+  `.github/rulesets/main.json`. Scorecard itself runs in CI as a report only ("Running it" above).
 - **SonarQube, Code Climate and GitHub Advanced Security** are services, paid or hosted, and need a
   token; this repository holds none. Their published conditions are applied here with open tools.
 - **Nesting depth and boolean-expression limits** exist in ruff only as preview rules, which change
@@ -169,7 +214,15 @@ bandit 1.9.4, coverage.py 7.16.2, ruff 0.16.10, CrossHair 0.0.111, git 2.43.
 - The symbolic gate grew from 10 targets to 32 and from about 2 to about 7 minutes on 4 cores; the
   conditions over unbounded tuples and strings run to their whole 20 s bound when no counterexample
   exists. CrossHair 0.0.111's symbolic frozenset refused `frozenset.intersection` called unbound
-  (`design.lcom4`'s condition is written with `&` instead, same meaning).
+  (`design.lcom4`'s condition is written with `&` instead, same meaning). On 2026-10-08, with 41
+  targets and every condition's verdict printed and counted on every run (until then only
+  `--report-all` showed them, and 107 of 117 conditions were at the bound): `gate: conditions: 11
+  of 121 confirmed over all paths, 110 not confirmed within 20 s per condition, 0 unable to meet a
+  precondition`, in 11 min 57 s wall time on 4 cores shared with two other sessions' test runs,
+  and on 5.0.0's tree of 56 targets `13 of 165 confirmed over all paths, 152 not confirmed
+  within 20 s per condition, 0 unable to meet a precondition` in 14 min 3 s (measured at 89a3da8);
+  `security.level_for`, the one target whose precondition no input could meet, proves over all
+  paths now that its grades are an enum (CLAUDE.md, "Measured").
 - Two functions were broken on purpose before their contracts were trusted. `classify` marking an
   equal finding `updated`: CrossHair found the counterexample. `changed_lines` reading one line too
   many from each hunk: CrossHair found none within its bound (the input must be a well-formed diff),
@@ -185,6 +238,150 @@ bandit 1.9.4, coverage.py 7.16.2, ruff 0.16.10, CrossHair 0.0.111, git 2.43.
 - The hook script was broken on purpose before its tests were trusted: without `|| exit 0` an
   older copy's argparse refusal (exit 2) came through, and with the last test inverted an empty
   answer printed an empty line; the tests failed on each (`tests/test_coach_hook.py`).
+- On 2026-10-08, zizmor 1.30.1 and Scorecard 5.5.0 (the same session size). zizmor over this
+  repository's four workflows takes 0.2 s a run, JSON or plain, and the whole supply-chain group
+  with no base 0.6 s. Its JSON counts rows from 0 where its plain output counts lines from 1
+  (`ci.yml:73:14` in plain was row 72, column 13); the Primary location is the one anchored to,
+  the Hidden and Related ones are the step and the key around it. Left to itself it honoured an
+  inline `# zizmor: ignore[unpinned-uses]` and the ignore rules of a `zizmor.yml` (a High and a Low
+  disappeared); with `--no-ignores --no-config` both came back, the inline one marked `ignored:
+  true` and reported all the same. With `--no-exit-codes` a non-zero exit means it did not run: a
+  file it cannot read as a workflow (a YAML list, a syntax error) is passed over with a warning,
+  and when every file given is such it exits 3 saying it collected no input, which the group reads
+  as no finding. At the regular persona on this repository: one Low, `adhoc-packages` for the
+  `npm install -g` of the Claude Code CLI; the auditor persona adds `undocumented-permissions`,
+  `anonymous-definition` and `concurrency-limits`, style opinions, and `secrets-outside-env`,
+  which would have `RULESETS_TOKEN` read through a GitHub Environment where `rulesets.yml` reads
+  it as a plain Actions secret; the persona is not used. Scorecard `--local` on a clone of this
+  tree runs
+  Binary-Artifacts 10, Dangerous-Workflow 10, Token-Permissions 10, Vulnerabilities 10,
+  Pinned-Dependencies 8 (the npm install, `0 out of 1 npmCommand dependencies pinned`; the pixi
+  download it does not see), Dependency-Update-Tool 0, Fuzzing 0, License 0, SAST 0,
+  Security-Policy 0 and Packaging without a score, aggregate 5.8, in 0.6 s; the other seven checks
+  end with `Unsupported RequestType [0]`. A worktree's `.pixi` link it skipped; a real `.pixi/`
+  holding one binary scored Binary-Artifacts 9. The tarball's sha256 equals the release's
+  `scorecard_checksums.txt`; pixi 0.81.0's asset has no such file, and its digest was measured
+  twice from two downloads at different times and matched the binary this session runs.
+
+On 2026-10-08, with jscpd 5.4.0 (the same session size):
+
+- 4.0.0's token-window detector (a block of 10 lines holding 100 of its own tokens, about 8.6 a
+  line of code) let a 13-line verbatim copy of a plain function through; jscpd found it, as 57 of
+  its tokens. On this package jscpd counts 7.4 tokens a line over all lines and 10.3 a line of code
+  (40946 tokens, 5569 lines, 3978 of them code), a quarter more than Python's `tokenize` gives
+  for the same text under the lock's Python 3.11.17 (32723 names, operators, numbers and strings;
+  Python 3.12's tokenizer, which splits f-strings, gives 34366). Its weak mode leaves comments
+  out (two comments: two tokens fewer); its strict mode counts the whitespace too (79 against 45
+  for an 11-line function).
+- At the floor (10 lines, 40 tokens) the package holds no clone once imports and docstrings are
+  set aside; with them compared, two pairs of identical import blocks and nothing else
+  (`design`/`readability`, 11 lines, 40 tokens; `readability`/`security`, 15 lines, 42): 0.46% of
+  its lines. A run at a floor of one token lists clones differently (one of the two pairs, at 31
+  tokens), so the counts above come from runs at the floor.
+- jscpd reads a `.jscpd.json` from the directory it is run in and from nowhere else: one planted
+  at the repository root, beside the package and in the scanned directory changed nothing, and one
+  in the working directory set the floors out of reach (`--debug` showed it merged). It reads
+  `jscpd:ignore-start` wherever the text stands: a comment with or without a space after the `#`,
+  a trailing comment, a string literal and a docstring each hid the rest of the file;
+  `JSCPD:IGNORE-START`, `jscpd:ignore` alone, `jscpd:ignore-end` alone and `jscpd-ignore-start`
+  hid nothing, which is why the staged copy holds the last. A symlinked `.py` file is not
+  followed; a file that does not parse stops nothing; a directory with no file leaves a report
+  with no source, a missing directory no report and exit 1.
+- The report's `fragment` holds the first side's whole lines from the clone's first to its last,
+  the text before the copy on its first line among them (`def first(items):` for a clone that
+  starts at `(items):`), so it is not what the two sides share; a side is anchored by its own
+  text cut at the report's start and end columns instead, and swapping two copied functions' names
+  left their clone matched (`updated`, 2 new lines in it). The end column can lie one token past
+  the copied text: a block whose copies part at `return` and `raise` was reported one line longer
+  than the copy, and that line counts as duplicated, as jscpd counts it. A clone class of three
+  copies is reported as two pairs, each later copy with the first.
+- The group took 274 ms in-process on this package before (one tokenize and one parse of every
+  module, no process) and about 300 ms after (jscpd once per tree, 40 ms a run, and a module
+  tokenized only when the diff names it or it holds the marker; with no base, every module); from
+  the command line 1.1 s against a base and 0.8 s with none, before and after alike, Python's
+  start-up being most of it.
+
+- On 2026-10-08, lizard 1.24.1 (pinned beside jscpd and zizmor) took over the lines of code per
+  function from the count the group made itself out of the tokens. lizard's start line is the
+  `def` line for a decorated function (the decorators above it not counted) and for a signature
+  over several lines alike, the line the syntax tree gives, so each of its rows is matched by file
+  and start line and anchored by the tree's qualified name (lizard's own name has no class and
+  reads `outer.inner` for a nested function); the anchors did not change, and old findings still
+  match. Its NLOC counts the `def` line, each further line of the signature, every line of a
+  bracketed expression and the lines of a multi-line string where it counts them (one assigned
+  or passed as an argument; one after `yield` or `==`, as a dict's value, and the pieces of an
+  f-string, it takes for a comment and leaves out or subtracts, measured the same day: a
+  nine-line function holding a five-line f-string measured 3), and leaves out a docstring in
+  triple quotes (one in single quotes counts), comments, blank lines and the body of a nested
+  function, whose `def` line it counts in the function around it. Over
+  this package's 256 functions at ddd8c19, NLOC was the body count plus one for 235 of them; the 21
+  others differ by the signature's lines (`sig`, the `def` line included) and the nested bodies
+  left out (`nest`), NLOC = body + sig − nest in every case:
+
+  | function | body | NLOC | sig | nest |
+  | - | -: | -: | -: | -: |
+  | `boundary.compare_copy` | 6 | 9 | 3 | 0 |
+  | `boundary.unpublished` | 11 | 14 | 3 | 0 |
+  | `boundary.stale_exceptions` | 1 | 4 | 3 | 0 |
+  | `boundary._off_surface` | 13 | 16 | 3 | 0 |
+  | `gate.crosshair_command` | 10 | 13 | 3 | 0 |
+  | `gate.set_aside` | 9 | 12 | 3 | 0 |
+  | `gate._modules` | 43 | 34 | 1 | 10 |
+  | `gate._run` | 102 | 101 | 1 | 2 |
+  | `standards.coverage.new_line_coverage` | 1 | 4 | 3 | 0 |
+  | `standards.coverage._tally` | 11 | 14 | 3 | 0 |
+  | `standards.design._components` | 12 | 10 | 1 | 3 |
+  | `standards.duplication.repeated` | 6 | 9 | 3 | 0 |
+  | `standards.duplication._marked` | 7 | 10 | 3 | 0 |
+  | `standards.findings.over_limit` | 14 | 17 | 3 | 0 |
+  | `standards.group._definitions` | 15 | 9 | 1 | 7 |
+  | `standards.group._compare` | 3 | 6 | 3 | 0 |
+  | `standards.newcode._unquote` | 10 | 7 | 1 | 4 |
+  | `standards.readability._defs` | 3 | 6 | 3 | 0 |
+  | `standards.readability._check` | 23 | 20 | 1 | 4 |
+  | `vendor._write_copy` | 17 | 23 | 6 | 0 |
+  | `vendor._preflight` | 24 | 31 | 7 | 0 |
+
+  The limit is therefore 26 in NLOC, the Drive file's 25 lines in the body and one for the `def`
+  line, and a signature over several lines spends part of the 25: `vendor._preflight`, 24 lines of
+  body under a 7-line signature, is the one old finding this added (15 where there were 14, all
+  unchanged). The readability group took 2.0 s before and 2.2 to 2.4 s after; lizard runs twice,
+  at the head and at the base, 0.3 s each with its interpreter's start. The oracle for a plain
+  body of N statements, where the two counts must agree, is the old count kept in
+  `tests/test_standards_groups.py` (`body_length` in the module is its definition).
+- What lizard 1.24.1 does not do, and how the group answers (measured the same day, from its
+  `PythonIndents.set_nesting` and `FileInfoBuilder.end_of_function`). A function written on its
+  `def` line (`def f(x): return x`, or with the body on the line that closes the parameters)
+  holds one line of code and the group never counts it: lizard lists it only when a
+  deeper-indented line follows in the same block, and then charges it with that statement's lines
+  (`def noop(*_): ...` before a 30-line list was listed with 32), so the syntax tree's word that
+  the function ends on its `def` line drops the row. A nested function written on its `def` line
+  (`def inner(): ...`) takes lizard's place of the function around it, which is then not listed.
+  lizard's own `#lizard forgive` comment drops the function it closes (the
+  one before it, not the one after), and a comment holding `GENERATED CODE` drops the rest of the
+  file, which this module's own comments did when they named the two phrases and had to be
+  reworded (a string literal is no comment to lizard); a function the syntax tree has, whose body
+  begins on a line of its own and which lizard leaves out, is refused by name and the group does
+  not run, since nothing in a repository's files may loosen a limit. Any line after the
+  parameters' `)` at the `def`'s indentation or less whose first token is not a `)` ends the
+  function to lizard: a return annotation over several lines (`-> dict[`, `str, int`, `]:`), which
+  ruff format does write for a long one, left a function of 30 lines listed with 2; such a
+  function is refused by name and line rather than counted short, and so is a dedented
+  continuation line, which ruff format never leaves (lizard's own reading of that one was not
+  measured; the refusal is the safe side). These refusals are the head's: at the base the same
+  function is left out, so the pull request that removes the shape from `main` is never refused
+  for it, and its finding, where the function is over the limit, counts as new. A multi-line
+  string is one token and its lines at column 0 do no such thing. lizard's
+  `whitelizard.txt` filters its warnings only, never its CSV, and is looked for in the working
+  directory, which is empty; a file given by name is read with or without `.gitignore`
+  (`--no-gitignore` is passed all the same); its exit code is 0 under `--csv` whatever its own
+  thresholds see; a module with a syntax error is listed as one function to its end, and the tree
+  has no function at that line, so nothing is recorded for it, as before.
+- jscpd's columns count the bytes of the line's UTF-8, not its characters (2026-10-08). On a line
+  holding `"éééé😀"` before a copy it reported column 19 where the copy's character index was 11,
+  so the group cuts a side's anchor as bytes. And two functions of eight code lines with four
+  blank lines after their `def` line are a 12-line clone of 78 tokens at the floor: the blank
+  lines count toward the ten.
 
 ## Not yet measured
 
@@ -196,3 +393,10 @@ bandit 1.9.4, coverage.py 7.16.2, ruff 0.16.10, CrossHair 0.0.111, git 2.43.
   been seen reading an answer beside its edit.
 - How long the coverage group takes on a large test suite, and whether the pre-push gate should
   leave it to CI there.
+- The `scorecard (report)` job on a GitHub runner: its steps were run here under a stub curl that
+  delivers the wrong bytes (the digest check refuses and removes the file) and Scorecard itself on
+  a clone of the tree, never the whole job on a runner; nor whether its Vulnerabilities and Fuzzing
+  checks, which ask OSV and OSS-Fuzz rather than GitHub, answer from a runner as they did here.
+- The strict policy in action: that a pull request behind `main` is held, and merges once the
+  branch carries `main`, has been read in GitHub's description of the flag, not yet seen on a
+  pull request of this repository.

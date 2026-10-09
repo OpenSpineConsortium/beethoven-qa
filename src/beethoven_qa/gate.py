@@ -9,12 +9,23 @@ Two checks; both always run, and the gate fails on either:
    off or cuts it short, and no public coroutine waits to be proven (CrossHair would check the
    un-awaited coroutine object). A package with nothing to prove is a failure, not a pass: a gate
    that only ever says "no counterexample" because there was nothing to check is the
-   wrong-but-plausible failure this project guards against.
+   wrong-but-plausible failure this project guards against. Nothing sets a finding aside either:
+   no comment of the kind the standards' tools read (``# noqa``, ``# type: ignore``, ``# nosec``,
+   ``# pragma: no cover``, ``# jscpd:ignore``, ``# zizmor: ignore``, ``# complexipy: ignore``,
+   lizard's ``#lizard forgive`` and ``GENERATED CODE``), and
+   no test skipped or expected to fail (pytest's and unittest's marks and calls), in the package
+   and in the repository's ``tests/`` directory, since the standards honour no such comment and a
+   test that does not run proves nothing. A string that holds such text is not a finding.
 2. CrossHair + Z3 find no input that satisfies the preconditions and violates a postcondition,
    within the per-condition timeout, for every contracted function and every class that carries
    contracts. CrossHair exits 1 on a counterexample and prints it; that is the SpecPylot feedback
-   the ``verify-module`` workflow reads back. With ``--report-all`` every condition's verdict is
-   printed, and a precondition no input can meet (a vacuous contract) fails the gate too.
+   the ``verify-module`` workflow reads back. Every run prints every condition's verdict
+   (``Confirmed over all paths.``, ``Not confirmed.`` within the bound, ``Unable to meet
+   precondition.``), counts them under each target and over the run (``verdicts``), and fails on a
+   precondition no input can meet: either the contract is vacuous, or it is stated over values
+   CrossHair cannot build. ``--report-all`` is accepted and changes nothing; it used to be the only
+   way to see the verdicts, and the plain gate the hook and CI ran passed such a precondition in
+   silence.
 
 A function CrossHair must not run (it reads, writes, asks the clock or starts a process) or cannot
 run (a measured fault of CrossHair's own) is named, with its reason, under
@@ -46,6 +57,7 @@ targets, but CrossHair runs whatever a target calls.
 
 from __future__ import annotations
 
+import ast
 import functools
 import importlib
 import inspect
@@ -70,11 +82,13 @@ from beethoven_qa.vendor import is_safe_relpath
 __all__ = [
     "FunctionEntry",
     "GateConfig",
+    "Verdicts",
     "crosshair_command",
     "is_dotted_identifier",
     "is_public",
     "set_aside",
     "uncontracted",
+    "verdicts",
 ]
 
 # A dotted Python module path: identifiers separated by single dots, nothing else.
@@ -169,15 +183,13 @@ def uncontracted(entries: tuple[FunctionEntry, ...], exempt: frozenset[str]) -> 
     "the declared bound is the one applied",
 )
 @ensure(lambda result, target: target in result, "the target is the one checked")
-@ensure(
-    lambda result, report_all: (result[-1] == "--report_all") == report_all,
-    "every verdict is printed exactly when it was asked for",
-)
-def crosshair_command(
-    python: str, target: str, timeout: int, report_all: bool = False
-) -> list[str]:
+@ensure(lambda result: result[-1] == "--report_all", "every condition's verdict is printed")
+def crosshair_command(python: str, target: str, timeout: int) -> list[str]:
     """The CrossHair command line that proves the contracts of ``target`` (a function, a class, a
-    module or a directory) within ``timeout`` seconds per condition."""
+    module or a directory) within ``timeout`` seconds per condition, and says what it found of
+    every condition: without ``--report_all`` CrossHair prints a counterexample and nothing else,
+    so a precondition no input meets, and a search that ran to its bound, looked like a proof.
+    """
     return [
         python,
         "-m",
@@ -186,8 +198,59 @@ def crosshair_command(
         target,
         "--analysis_kind=icontract",
         f"--per_condition_timeout={timeout}",
-        *(["--report_all"] if report_all else []),
+        "--report_all",
     ]
+
+
+class Verdicts(NamedTuple):
+    """How many conditions CrossHair confirmed over all paths, could not confirm within the bound
+    (no counterexample, no proof), and could find no input for (a precondition it could not
+    meet). A counterexample is none of these: CrossHair exits 1 on it and the gate fails there."""
+
+    confirmed: int
+    unconfirmed: int
+    unmet: int
+
+
+# CrossHair's own line for each condition, ``<file>:<line>: info: <verdict>``.
+_CONFIRMED = ": info: Confirmed over all paths."
+_UNCONFIRMED = ": info: Not confirmed."
+# CrossHair 0.0.111 ends the third with a period when no input met the precondition and with the
+# reason in parentheses when the precondition raised ("(possibly because it raised ... ?)", its
+# core.py), so that verdict is read by its opening words, the other two by their whole line.
+_UNMET = ": info: Unable to meet precondition"
+
+
+@beartype
+@ensure(
+    lambda result, text: sum(result) <= text.count(": info: "),
+    "only CrossHair's own info lines carry a verdict",
+)
+@ensure(
+    lambda result, text: (
+        sum(result)
+        == sum(
+            1
+            for line in text.splitlines()
+            if _UNMET in line or line.endswith((_CONFIRMED, _UNCONFIRMED))
+        )
+    ),
+    "every verdict line is counted once, under one verdict, and nothing else is counted",
+)
+@ensure(
+    lambda result, text: (result.unmet > 0) == any(_UNMET in line for line in text.splitlines()),
+    "a precondition no input can meet is never missed and never invented, with or without a reason",
+)
+def verdicts(text: str) -> Verdicts:
+    """The verdicts in what one CrossHair process printed, counted from its per-condition lines."""
+    lines = text.splitlines()
+    unmet = sum(1 for line in lines if _UNMET in line)
+    rest = [line for line in lines if _UNMET not in line]
+    return Verdicts(
+        sum(1 for line in rest if line.endswith(_CONFIRMED)),
+        sum(1 for line in rest if line.endswith(_UNCONFIRMED)),
+        unmet,
+    )
 
 
 @beartype
@@ -491,24 +554,221 @@ def _targets(modules: list[ModuleType], package: str) -> tuple[list[str], list[s
     return sorted(functions), sorted(classes), sorted(bare)
 
 
-def _directives(paths: list[Path], root: Path) -> list[str]:
-    # A `# crosshair:` comment can switch checking off or cut the search below the declared bound,
-    # and the command line cannot override every one of them; none is allowed in a checked package.
+def _test_trees(root: Path) -> list[Path]:
+    # Where pytest collects: the directories ``[tool.pytest.ini_options].testpaths`` names, else
+    # ``tests``, and a ``conftest.py`` at the root, which pytest reads from anywhere below it.
+    with (root / "pyproject.toml").open("rb") as fh:
+        options = tomllib.load(fh).get("tool", {}).get("pytest", {}).get("ini_options", {})
+    paths = options.get("testpaths", ["tests"])
+    trees = [root / p for p in (paths.split() if isinstance(paths, str) else paths)]
+    conftest = root / "conftest.py"
+    return trees + ([conftest] if conftest.is_file() else [])
+
+
+def _checked_files(
+    root: Path, config: GateConfig, modules: list[ModuleType], only: str | None
+) -> list[Path]:
+    # The files read for what would hide a finding: under --module that module's own, and a stub
+    # beside it; otherwise every .py and .pyi file of the package and of the directories pytest
+    # collects, where a suppression or a skipped test most often sits. A pinned copy under
+    # vendor/ is in neither, and vendor-check guards it.
+    if only is not None:
+        own = [Path(f) for m in modules if (f := getattr(m, "__file__", None))]
+        return own + [stub for path in own if (stub := path.with_suffix(".pyi")).is_file()]
+    trees = [(root / config.src / config.package).resolve(), *_test_trees(root)]
+    files = [tree for tree in trees if tree.is_file()]
+    return files + [
+        path
+        for tree in trees
+        if tree.is_dir()
+        for path in sorted(tree.rglob("*.py*"))
+        if path.suffix in {".py", ".pyi"} and "__pycache__" not in path.parts
+    ]
+
+
+def _comments(path: Path) -> list[tuple[int, str]]:
+    # Every comment of the file with its line, by tokenize, so a string holding the same text is
+    # never one.
+    with path.open("rb") as fh:
+        return [
+            (token.start[0], token.string)
+            for token in tokenize.tokenize(fh.readline)
+            if token.type == tokenize.COMMENT
+        ]
+
+
+def _dotted(node: ast.expr) -> str | None:
+    # The dotted name an expression spells, or None when it is not a name.
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        head = _dotted(node.value)
+        return None if head is None else f"{head}.{node.attr}"
+    return None
+
+
+def _bound_by(node: ast.Import | ast.ImportFrom) -> dict[str, str]:
+    # What one import statement binds, to the dotted name each binding stands for: `import a.b`
+    # binds `a` to the package `a`, `import a.b as c` binds `c` to `a.b`, and `from m import x as
+    # y` binds `y` to `m.x`. A relative import reaches nothing of pytest's or unittest's and binds
+    # nothing here.
+    if isinstance(node, ast.ImportFrom):
+        if not node.module or node.level:
+            return {}
+        return {alias.asname or alias.name: f"{node.module}.{alias.name}" for alias in node.names}
+    bound: dict[str, str] = {}
+    for alias in node.names:
+        head = alias.name.partition(".")[0]
+        bound[alias.asname or head] = alias.name if alias.asname else head
+    return bound
+
+
+def _imports(tree: ast.Module) -> dict[str, str]:
+    # The name each import binds, to the dotted name it stands for, so `from pytest import mark` and
+    # `import unittest as ut` are read as what they are.
+    names: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(_bound_by(node))
+    return names
+
+
+def _skips(tree: ast.Module) -> list[tuple[int, str]]:
+    # Every name that skips a test or expects it to fail, wherever it is written (a decorator, a
+    # call, a mark bound to ``pytestmark`` or given to ``pytest.param`` or ``add_marker``, an
+    # exception raised, a TestCase's ``skipTest``), by the dotted name as written and as the
+    # module's imports resolve it. ast.walk meets a dotted name's outer node before its inner
+    # ones, so a name is reported once, from where it begins.
+    names = _imports(tree)
+    found: dict[tuple[int, int], str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Name, ast.Attribute)):
+            continue
+        if (node.lineno, node.col_offset) in found:
+            continue
+        dotted = _dotted(node)
+        if dotted is None:
+            continue
+        head, dot, rest = dotted.partition(".")
+        method = isinstance(node, ast.Attribute) and node.attr == _SKIP_METHOD
+        if method or dotted in _SKIPS or names.get(head, head) + dot + rest in _SKIPS:
+            found[node.lineno, node.col_offset] = dotted
+    return [(line, name) for (line, _), name in found.items()]
+
+
+def _hidden_in(path: Path) -> list[tuple[str, str]]:
+    # (kind, "<line>: <what and why>") for each comment or test mark of one file that would hide
+    # something; the file is read once by tokenize for its comments and once by ast for the names
+    # a decorator or a call reaches, because a comment is no node and a string is no comment.
+    found: list[tuple[str, str]] = []
+    if path.suffix == ".pyi":
+        return [("stub", f" {_NO_STUB}")]
+    for line, text in _comments(path):
+        if _DIRECTIVE.match(text):
+            found.append(("directive", f"{line}: {text}"))
+        elif _SUPPRESSION.search(text):
+            found.append(("suppression", f"{line}: {text}: {_NO_SUPPRESSION}"))
+    for line, name in _skips(ast.parse(path.read_bytes(), str(path))):
+        found.append(("skip", f"{line}: {name}: {_NO_SKIP}"))
+    return found
+
+
+def _hidden(paths: list[Path], root: Path) -> list[str]:
+    # Every line of ``paths`` that would hide something from the gate, the standards or the test
+    # run, with its file and line, and once per kind the way out. A `# crosshair:` comment can
+    # switch checking off or cut the search below the declared bound, and the command line cannot
+    # override every one of them; a suppression comment is read by no tool the standards run, and
+    # a skipped test runs nothing, and mypy reads a stub in place of the module beside it, so none
+    # of them is allowed in a checked repository.
     found: list[str] = []
     for path in paths:
-        with path.open("rb") as fh:
-            try:
-                for token in tokenize.tokenize(fh.readline):
-                    if token.type == tokenize.COMMENT and _DIRECTIVE.match(token.string):
-                        found.append(f"{path.relative_to(root)}:{token.start[0]}: {token.string}")
-            except (tokenize.TokenError, SyntaxError) as exc:
-                found.append(f"{path.relative_to(root)}: cannot be read: {exc}")
+        rel = path.relative_to(root)
+        try:
+            found += [f"{kind} {rel}:{text}" for kind, text in _hidden_in(path)]
+        except (tokenize.TokenError, SyntaxError) as exc:
+            found.append(f"{rel}: cannot be read: {exc}")
+    if any(line.startswith("directive ") for line in found):
+        found.append(_INSTEAD_OF_A_DIRECTIVE)
+    if any(line.startswith(("suppression ", "skip ", "stub ")) for line in found):
+        found.append(_INSTEAD_OF_A_SUPPRESSION)
     return found
 
 
 _DIRECTIVE = re.compile(r"#\s*crosshair\s*:", re.IGNORECASE)
+# The comments that set a finding or a line aside for ruff (and flake8, and isort's markers that
+# ruff's import rule honours, and the formatter's), mypy (every inline configuration comment,
+# which loosens the file whatever it names), bandit, coverage.py, jscpd, zizmor or complexipy,
+# each found wherever a hash begins it inside a comment, the way the tools find them:
+# whitespace-tolerant, whatever the case.
+_SUPPRESSION = re.compile(
+    r"#\s*(?:"
+    r"(?:(?:flake8|ruff)\s*:\s*)?noqa\b"
+    r"|type\s*:\s*ignore\b"
+    r"|mypy\s*:"
+    r"|(?:ruff\s*:\s*)?isort\s*:\s*(?:skip|off)"
+    r"|fmt\s*:\s*(?:off|skip)\b"
+    r"|nosec\b"
+    r"|pragma[:\s]\s*no\s*cover\b"
+    r"|jscpd\s*:\s*ignore"
+    r"|zizmor\s*:\s*ignore"
+    r"|complexipy\s*:\s*ignore"
+    r")"
+    # lizard's two, read the way lizard reads them (its comment_counter), in this case only: a
+    # comment that opens with the first, the hash joined to the word, drops the function it closes
+    # from the count; the second anywhere in a comment drops the rest of the file.
+    r"|(?-i:\A#lizard forgive)"
+    r"|(?-i:GENERATED CODE)",
+    re.IGNORECASE,
+)
+# The decorators and calls that keep a test from running or from counting.
+_SKIPS = frozenset(
+    {
+        "pytest.mark.skip",
+        "pytest.mark.skipif",
+        "pytest.mark.xfail",
+        "pytest.skip",
+        "pytest.xfail",
+        "pytest.importorskip",
+        "unittest.skip",
+        "unittest.skipIf",
+        "unittest.skipUnless",
+        "unittest.expectedFailure",
+        "unittest.SkipTest",
+        "unittest.case.skip",
+        "unittest.case.skipIf",
+        "unittest.case.skipUnless",
+        "unittest.case.expectedFailure",
+        "unittest.case.SkipTest",
+        "pytest.skip.Exception",
+        "_pytest.outcomes.skip",
+        "_pytest.outcomes.xfail",
+        "_pytest.outcomes.importorskip",
+        "_pytest.outcomes.Skipped",
+        "_pytest.outcomes.XFailed",
+    }
+)
+# A TestCase's own way out, met as an attribute of whatever object, since ``self`` is no import.
+_SKIP_METHOD = "skipTest"
+_NO_SUPPRESSION = "no comment sets a finding aside; fix what it hides"
+_NO_STUB = (
+    "mypy reads a stub in place of the module beside it, whatever the module holds; no stub "
+    "sets a finding aside, remove it and type the module"
+)
+_NO_SKIP = "a test is never skipped or expected to fail; make it pass or remove it"
+_INSTEAD_OF_A_DIRECTIVE = (
+    "instead of a directive: a function CrossHair must not or cannot run goes under "
+    "[tool.beethoven-qa.unproven] with its reason; a bound below the declared one, never"
+)
+_INSTEAD_OF_A_SUPPRESSION = (
+    "instead of a suppression: fix the finding the comment hides, narrow the type, or make the "
+    "test pass; the standards honour no such comment and a test that does not run proves nothing"
+)
 _NOTHING_TO_CHECK = "WARNING: Targets found, but contain no checkable functions."
-_VACUOUS = "Unable to meet precondition."
+_VACUOUS = (
+    "a precondition no input can meet: either the contract is vacuous, or it is stated over values "
+    "CrossHair cannot build; restate it over an enum, or list the function under "
+    "[tool.beethoven-qa.unproven] with that reason"
+)
 
 
 def _jobs() -> int:
@@ -521,7 +781,45 @@ def _jobs() -> int:
     return cores
 
 
-def _run(root: Path, only: str | None = None, report_all: bool = False) -> int:
+def _said(
+    target: str, result: subprocess.CompletedProcess[str], timeout: int
+) -> tuple[Verdicts, list[str]]:
+    # What CrossHair said of one target, printed under its exit line with the count of its
+    # verdicts, and what that output shows the gate must refuse.
+    output = (result.stdout + result.stderr).strip()
+    counts = verdicts(output)
+    print(f"gate: {target}: exit {result.returncode}")
+    print(
+        f"gate: {target}: {counts.confirmed} confirmed over all paths, {counts.unconfirmed} "
+        f"not confirmed within {timeout} s, {counts.unmet} unable to meet a precondition"
+    )
+    if output:
+        print(output)
+    problems: list[str] = []
+    if result.returncode == 0 and _NOTHING_TO_CHECK in output:
+        problems.append(f"CrossHair found nothing to check in {target}, which has contracts")
+    if counts.unmet:
+        problems.append(f"{target}: {_VACUOUS}")
+    return counts, problems
+
+
+def _report(
+    targets: list[str], results: list[subprocess.CompletedProcess[str]], timeout: int
+) -> tuple[int, Verdicts, list[str]]:
+    # Every target's lines in order: the first non-zero exit, the counts over every target, and
+    # what the outputs show the gate must refuse.
+    failed = 0
+    totals = Verdicts(0, 0, 0)
+    problems: list[str] = []
+    for target, result in zip(targets, results, strict=True):
+        counts, found = _said(target, result, timeout)
+        totals = Verdicts(*(sum(pair) for pair in zip(totals, counts, strict=True)))
+        failed = failed or result.returncode
+        problems.extend(found)
+    return failed, totals, problems
+
+
+def _run(root: Path, only: str | None = None) -> int:
     # Both checks for the repository at ``root``, or for its module ``only``; 0 when both pass, 2
     # when ``only`` is not a checked module of the package. Private and uncontracted on purpose: it
     # imports the package and starts CrossHair, which CrossHair must never do itself.
@@ -544,17 +842,7 @@ def _run(root: Path, only: str | None = None, report_all: bool = False) -> int:
             return 2
         modules = [m for m in modules if m.__name__ == only]
         problems = [p for p in problems if p.startswith(f"importing {only} ")]
-    files = [Path(f) for m in modules if (f := getattr(m, "__file__", None))]
-    if only is None:
-        home = (root / config.src / config.package).resolve()
-        files = [p for p in sorted(home.rglob("*.py")) if "__pycache__" not in p.parts]
-    directives = _directives(files, root)
-    problems += [f"directive {d}" for d in directives]
-    if directives:
-        problems.append(
-            "instead of a directive: a function CrossHair must not or cannot run goes under "
-            "[tool.beethoven-qa.unproven] with its reason; a bound below the declared one, never"
-        )
+    problems += _hidden(_checked_files(root, config, modules, only), root)
     problems += [
         f"{name} is a coroutine: CrossHair would check the un-awaited coroutine object; keep the "
         "logic in a synchronous contracted function and the coroutine private"
@@ -616,26 +904,21 @@ def _run(root: Path, only: str | None = None, report_all: bool = False) -> int:
     env = {**os.environ, "PYTHONPATH": pythonpath}
 
     def prove(target: str) -> subprocess.CompletedProcess[str]:
-        cmd = crosshair_command(sys.executable, target, timeout, report_all)
+        cmd = crosshair_command(sys.executable, target, timeout)
         return subprocess.run(cmd, env=env, cwd=root, capture_output=True, text=True, check=False)
 
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         results = list(pool.map(prove, targets))
-    failed = 0
-    for target, result in zip(targets, results, strict=True):
-        output = (result.stdout + result.stderr).strip()
-        if result.returncode != 0 or output:
-            print(f"gate: {target}: exit {result.returncode}")
-            if output:
-                print(output)
-        if result.returncode != 0:
-            failed = failed or result.returncode
-        elif _NOTHING_TO_CHECK in output:
-            problems.append(f"CrossHair found nothing to check in {target}, which has contracts")
-        elif _VACUOUS in output:
-            problems.append(f"{target}: a precondition no input can meet (a vacuous contract)")
+    failed, totals, refused = _report(targets, results, timeout)
+    problems += refused
     for line in problems:
         print(line if line.startswith("  - ") else f"gate: {line}")
+    # The last line before the verdict, in this exact form: the report command reads it back.
+    print(
+        f"gate: conditions: {totals.confirmed} of {sum(totals)} confirmed over all paths, "
+        f"{totals.unconfirmed} not confirmed within {timeout} s per condition, "
+        f"{totals.unmet} unable to meet a precondition"
+    )
     if failed or problems:
         return failed or 1
     print(f"gate: no counterexample within {timeout} s per condition")
