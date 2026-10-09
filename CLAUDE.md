@@ -259,7 +259,8 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   required checks, the workflows' jobs), who decides each verdict, where a language model is
   involved and what the report does not show. Exit 0, 1 (a lane failed; the report still
   written) or 2 (cannot run). `pixi run --locked report`; CI's job `report (evidence)` keeps the
-  folder as an artifact and is not a required check.
+  folder as an artifact, names each failed lane as an annotation of the check (the API serves
+  those where the log needs a second download), and is not a required check.
 - `interface/` (from 2.0.0): this repository's manifest under that standard, `INTERFACE.json`, with
   `python.json` (the modules and names a consumer may import: `beethoven_qa.contracts` and
   `__version__`, nothing else) and `cli.json` (the seven commands, their options and exit codes,
@@ -395,7 +396,8 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   per condition, 0 unable to meet a precondition` in 11 min 57 s wall time on 4 cores shared with
   two other sessions' test runs, and on 5.0.0's tree of 56 targets `13 of 165 confirmed
   over all paths, 152 not confirmed within 20 s per condition, 0 unable to meet a precondition`
-  in 14 min 3 s (measured at 89a3da8); the module gate on
+  in 14 min 3 s (measured at 89a3da8), and on GitHub's runner the same lane took 26 min and the
+  gate job 28 min 45 s of its 30-minute limit, now 60 (5.0.0's pull request, 2026-10-09); the module gate on
   `beethoven_qa.gate` (6 targets, `verdicts` among them) 1 of 21
   confirmed over all paths (`is_public`), 20 not confirmed at the bound, every one of them over
   strings or tuples, no counterexample, in 2 min 6 s. The suppression check, run on

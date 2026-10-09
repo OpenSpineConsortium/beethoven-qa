@@ -155,10 +155,18 @@ confirmed" at the full 20 s (each quantifies over unbounded strings or tuples), 
 and no unmet precondition. The report's own tests take about 3 s; the end-to-end run on the
 throwaway repository is 2.5 s of it, most of it the tools answering `--version`.
 
+On 2026-10-09, the whole report on a fresh clone of 5.0.0's merge commit (8710049), as the CI job
+makes it (`--base HEAD^1`), in a cloud session with 4 cores: every lane passed, in 22 min 11 s
+(the symbolic lane 886 s, the standards lane 230 s, the tests 205 s).
+
 ## Not yet measured
 
 - The report on a consumer's repository (beethoven-agents, beethoven-research): the
   `vendor-check` lane and a `pixi.toml` of their own have been run only against a throwaway
   repository's stub tasks.
-- The CI job on GitHub's runner: written against the `gate` job's steps and the `standards.yml`
-  artifact step, not yet seen running.
+- Why the CI job failed on 5.0.0's pull request (2026-10-09): on GitHub's runner it ran 29 min
+  and a lane exited non-zero, while the same report made on a fresh clone of the merge commit in
+  a cloud session passed every lane; the job's log and its artifact sit behind a download that
+  session could not reach. The job now names each failed lane as an annotation of the check, with
+  the lines of its output that say why and its last lines (the step `name the failed lanes` in
+  `ci.yml`), so the next failure says itself to anyone who can read the check.
