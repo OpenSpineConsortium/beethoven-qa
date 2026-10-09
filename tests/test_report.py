@@ -336,7 +336,7 @@ def test_deciders_names_each_check_and_what_the_logs_say() -> None:
     assert "proven" not in " ".join(w for _, w in rows.items())
     assert VENDOR_LANE in rows
     assert rows["whether a change merges"].endswith(
-        "the bypass the rule grants: OrganizationAdmin (always)"
+        "the bypass the rule grants to OrganizationAdmin (always); it names no one else"
     )
     unbypassed = dict(deciders(tools, lanes, groups, rule._replace(bypass=())))
     assert unbypassed["whether a change merges"].endswith("; no person")

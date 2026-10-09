@@ -641,9 +641,14 @@ def _group_row(group: GroupSummary) -> tuple[str, str]:
 
 
 def _merge_row(bypass: tuple[str, ...]) -> tuple[str, str]:
+    # The row ends with a fixed phrase either way, so what the rule names can never spell the
+    # other ending (the gate found a bypass named "; no person" and refused the earlier text).
     rule = "GitHub's required checks, the rule as code in `.github/rulesets/main.json`; "
-    who = "no person" if not bypass else "a person only through the bypass the rule grants: "
-    return "whether a change merges", rule + who + ", ".join(bypass)
+    if not bypass:
+        return "whether a change merges", rule + "no person"
+    granted = ", ".join(bypass)
+    who = f"a person only through the bypass the rule grants to {granted}; it names no one else"
+    return "whether a change merges", rule + who
 
 
 def _after_groups(vendor: bool, bypass: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
