@@ -168,5 +168,6 @@ makes it (`--base HEAD^1`), in a cloud session with 4 cores: every lane passed, 
   and a lane exited non-zero, while the same report made on a fresh clone of the merge commit in
   a cloud session passed every lane; the job's log and its artifact sit behind a download that
   session could not reach. The job now names each failed lane as an annotation of the check, with
-  the lines of its output that say why and its last lines (the step `name the failed lanes` in
-  `ci.yml`), so the next failure says itself to anyone who can read the check.
+  the lines of its output that say why and its last lines, and for the symbolic lane each failed
+  CrossHair target with its error lines (the step `name the failed lanes` in `ci.yml`, running
+  `tools/name_failures.sh`), so the next failure says itself to anyone who can read the check.

@@ -61,7 +61,17 @@ jobs:
       - name: boundary (the interface standard's rules)
         run: pixi run --locked boundary
       - name: symbolic verification (CrossHair + Z3)
-        run: pixi run --locked symbolic
+        id: symbolic
+        # The output is kept for the step after, which names what failed where GitHub's API
+        # serves it; pipefail keeps the gate's exit code through the tee.
+        run: |
+          set -o pipefail
+          pixi run --locked symbolic 2>&1 | tee "$RUNNER_TEMP/symbolic.txt"
+      - name: name what the symbolic lane refused
+        # A check's annotations are served to anyone who can read it, where the log sits behind a
+        # second download (tools/name_failures.sh says which lines and why).
+        if: failure() && steps.symbolic.outcome == 'failure'
+        run: bash tools/name_failures.sh symbolic "$RUNNER_TEMP/symbolic.txt"
       - name: shell syntax of the kit
         # One file per call: bash -n parses its first operand only and makes the rest positional
         # parameters, so one call over both files checked the hook alone (measured 2026-10-04).
@@ -142,19 +152,15 @@ jobs:
         run: pixi run --locked report --base "$BASE"
       - name: name the failed lanes
         # GitHub's API serves a job's annotations to anyone who can read the check, where the log
-        # and the artifact sit behind a second download; so each failed lane is named here, with
-        # the lines of its output that say why and its last lines, read from the report itself.
+        # and the artifact sit behind a second download; so each failed lane is named here, read
+        # from the report itself (tools/name_failures.sh says which lines and why).
         if: failure()
         run: |
           set -euo pipefail
           [ -f report/report.json ] || { echo "::error title=report::no report.json was written"; exit 0; }
           jq -r '.lanes[] | select(.exit != 0) | [.task, (.exit | tostring), .output] | @tsv' report/report.json |
             while IFS=$'\t' read -r task code file; do
-              why="$(grep -E 'error|Error|FAIL|failed|refus|unable|Unable|cannot|stopped' "report/$file" | tail -n 20 || true)"
-              last="$(tail -n 12 "report/$file")"
-              text="${why}"$'\n''--- the last lines:'$'\n'"${last}"
-              text="${text//'%'/'%25'}"; text="${text//$'\r'/'%0D'}"; text="${text//$'\n'/'%0A'}"
-              echo "::error title=report lane ${task} exited ${code}::${text}"
+              bash tools/name_failures.sh "report lane ${task} exited ${code}" "report/$file"
             done
       - name: keep the report
         if: always()

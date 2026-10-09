@@ -260,7 +260,8 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   involved and what the report does not show. Exit 0, 1 (a lane failed; the report still
   written) or 2 (cannot run). `pixi run --locked report`; CI's job `report (evidence)` keeps the
   folder as an artifact, names each failed lane as an annotation of the check (the API serves
-  those where the log needs a second download), and is not a required check.
+  those where the log needs a second download; the gate job's symbolic lane names each failed
+  CrossHair target the same way, `tools/name_failures.sh`), and is not a required check.
 - `interface/` (from 2.0.0): this repository's manifest under that standard, `INTERFACE.json`, with
   `python.json` (the modules and names a consumer may import: `beethoven_qa.contracts` and
   `__version__`, nothing else) and `cli.json` (the seven commands, their options and exit codes,
@@ -444,6 +445,9 @@ tree with uncommitted or untracked files: commit everything first.
 - `tests/` — pytest under typeguard's import hook; `test_hooks.py` runs the kit's real pre-push
   hook with a stub pixi, a bare remote and a linked worktree.
 - `plugin/` — the Claude Code plugin (`hooks/` holds the coaching hook); `.claude-plugin/marketplace.json` — the marketplace listing it.
+- `tools/name_failures.sh` — CI's account of a failed lane in the check's annotations (each failed
+  CrossHair target with its error lines, what the gate refused, the runner);
+  `tests/test_name_failures.py` runs it, and the two steps around it, on a lane's output.
 - `tools/check_workflows.mjs` — CI's check of the workflow scripts against the runtime's rules
   (the meta literal and what follows it, the clock and randomness with every `\u` escape refused,
   module loading, `new.target`, both grammars); `tools/check_workflows.test.mjs` — its tests, and
