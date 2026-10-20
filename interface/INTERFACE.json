@@ -37,13 +37,13 @@
   {
    "id": "kit",
    "kind": "files",
-   "version": 2,
+   "version": 3,
    "summary": "The repository kit every consumer carries byte for byte at the same paths: the pre-push gate, the auto-merge, rulesets and standards workflows, and the cloud session's start hook. A consumer of the pinned copy takes it with vendor --kit and vendor-check compares it; the others copied it by hand and carry no record yet",
    "paths": [
     ".githooks/pre-push",
     ".github/workflows/automerge.yml",
     ".github/workflows/rulesets.yml",
-    ".claude/hooks/session-start.sh",
+    ".claude/hooks/beethoven-qa-session-start.sh",
     ".github/workflows/standards.yml"
    ],
    "consumers": [

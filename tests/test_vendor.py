@@ -318,7 +318,7 @@ def test_unsaved_files_git_status_would_hide_are_kept(tmp_path: Path) -> None:
     # Ignored by the consumer's .gitignore.
     consumer = _init(tmp_path / "c1")
     (consumer / ".gitignore").write_text(".claude/\n", encoding="utf-8")
-    hook = consumer / ".claude/hooks/session-start.sh"
+    hook = consumer / ".claude/hooks/beethoven-qa-session-start.sh"
     hook.parent.mkdir(parents=True)
     hook.write_text(mine, encoding="utf-8")
     assert _sync(consumer, install_kit=True, ref="main") == 2
@@ -807,7 +807,7 @@ def test_the_copy_carries_the_manifest_the_boundary_check_reads(tmp_path: Path) 
             "into": VENDOR_DIR,
             "origin": f"{VENDOR_DIR}/{ORIGIN_NAME}",
         }
-        for export, version in (("python", 1), ("cli", 3), ("kit", 2))
+        for export, version in (("python", 1), ("cli", 3), ("kit", 3))
     ]
     manifest = {
         "format": 1,
