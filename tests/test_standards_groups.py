@@ -1074,7 +1074,8 @@ def test_this_repositorys_own_workflows_pass_the_reader_and_zizmor() -> None:
     assert recorded == {("zizmor/adhoc-packages", "note")}
     # The hook is no workflow, so the reader never sees it; its download keeps the rule anyway,
     # and the rule sees the download: with its digest line gone, the same script is refused.
-    hook = (REPO / ".claude" / "hooks" / "session-start.sh").read_text(encoding="utf-8")
+    hook_file = REPO / ".claude" / "hooks" / "beethoven-qa-session-start.sh"
+    hook = hook_file.read_text(encoding="utf-8")
     assert not supply_chain.unchecked_download(hook) and not supply_chain.pipes_to_shell(hook)
     unchecked = "\n".join(line for line in hook.splitlines() if "sha256sum" not in line)
     assert supply_chain.unchecked_download(unchecked)

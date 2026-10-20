@@ -95,7 +95,7 @@ takes only the keys `agent` and `subagentStatusLine` and drops every other (plug
   gate is the same pinned gate. A stream never edits `vendor/beethoven-qa/`; `vendor-check` fails a
   copy edited by hand.
 - `${CLAUDE_PROJECT_DIR}` in a hook command stays the main checkout; the worktree path arrives as
-  `cwd` in the hook's JSON. The session-start hook (the kit's `.claude/hooks/session-start.sh`) runs
+  `cwd` in the hook's JSON. The session-start hook (the kit's `.claude/hooks/beethoven-qa-session-start.sh`) runs
   against the main checkout, which is what we want (it sets `core.hooksPath` once for every
   worktree).
 - A subagent in a worktree does not load the worktree's own `CLAUDE.md` or `.claude/rules/`; it

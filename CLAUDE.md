@@ -219,7 +219,7 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   <qa>`) and is refused anywhere else, because an edited copy would not refuse to vouch for itself
   where an unedited one does. The plain check also fails a byte-code cache git tracks under the
   copy or a hash-based `.pyc` there even untracked (Python loads either in place of the source),
-  and `.githooks/pre-push` or `.claude/hooks/session-start.sh` recorded by git as other than
+  and `.githooks/pre-push` or `.claude/hooks/beethoven-qa-session-start.sh` recorded by git as other than
   `100755`, live or under `kit/` (a `core.fileMode=false` checkout does that). A package named
   `beethoven_qa` in a consumer's own `src/` shadows the copy for every check and the gate alike:
   an unedited one fails the plain check, an edited one is seen by neither form, and a reviewer who
@@ -269,13 +269,13 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   `python.json` (the modules and names a consumer may import: `beethoven_qa.contracts` and
   `__version__`, nothing else) and `cli.json` (the seven commands, their options and exit codes,
   the `[tool.beethoven-qa]` table); exports `python`, `cli`, `kit`, `plugin` (files: Claude Code
-  reads it, nobody runs it) and `docs` (text); `cli` is at version 3 and `kit` at 2 since 5.0.0,
-  the others at 1 (`interface/README.md`). The copy
+  reads it, nobody runs it) and `docs` (text); `cli` is at version 3 since 5.0.0 and `kit` at 3
+  since 6.0.0, the others at 1 (`interface/README.md`). The copy
   carries it, so a consumer finds it at `vendor/beethoven-qa/interface/`;
   `tests/test_interface.py` holds it to the code.
 - The repository kit, carried byte for byte by every consumer: `.githooks/pre-push`,
   `.github/workflows/automerge.yml`, `.github/workflows/rulesets.yml`,
-  `.claude/hooks/session-start.sh`, `.github/workflows/standards.yml`. Change one here and every
+  `.claude/hooks/beethoven-qa-session-start.sh`, `.github/workflows/standards.yml`. Change one here and every
   consumer takes it with its next copy (`vendor --kit`); a consumer that re-pins to a release whose
   kit changed without `--kit` fails `vendor-check` on the file that differs until it does, by
   design. Release 2.0.0 adds `standards.yml` and changes `automerge.yml` and `rulesets.yml` (actions
@@ -284,7 +284,11 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   `scorecard (report)` job), `session-start.sh` (the same digest check; a pixi whose digest
   differs is removed and said so, and the session still starts) and `automerge.yml` (its header
   says what the strict checks policy of `.github/rulesets/main.json` means for a branch behind
-  `main`).
+  `main`). Release 6.0.0 renames the hook `.claude/hooks/beethoven-qa-session-start.sh` (its text
+  unchanged), because a repository made from OpenSpineConsortium/symphony-template already has
+  a `.claude/hooks/session-start.sh` of its own, which the kit at the old name overwrote and
+  `vendor-check` then refused; a consumer names the hook's new path in its own
+  `.claude/settings.json`, and a Symphony repository names both hooks, its own first.
 - `plugin/` and `.claude-plugin/marketplace.json`: the Claude Code plugin `beethoven-qa` (skills,
   the `stream` agent, the workflows `gate-until-green`, `verify-module`, `improve-module`, and from
   4.0.0 the code standards' `PostToolUse` hook under `plugin/hooks/`). On a
@@ -449,7 +453,7 @@ pixi run hooks                # point git at .githooks (the session-start hook d
 ```
 
 A Claude Code cloud session with only this repository gets pixi and the locked environment from
-`.claude/hooks/session-start.sh`; a project thread with several repositories does not read it and
+`.claude/hooks/beethoven-qa-session-start.sh`; a project thread with several repositories does not read it and
 needs the same commands as the environment's setup script. In this cloud environment `pixi` lands at
 `~/.pixi/bin`, which is not on the Bash tool's `PATH`: export it before `git push`, or the pre-push
 hook fails. The hook also refuses a push of any ref but the checked-out commit, and any push from a

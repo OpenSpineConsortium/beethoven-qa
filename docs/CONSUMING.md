@@ -47,7 +47,7 @@ Anthropic's marks, used here to say what it runs.
   .githooks/pre-push                kit: the gate before every push
   .github/workflows/automerge.yml   kit: auto-merge armed on every pull request opened ready
   .github/workflows/rulesets.yml    kit: .github/rulesets/*.json applied to GitHub
-  .claude/hooks/session-start.sh    kit: pixi and the locked environment in a cloud session
+  .claude/hooks/beethoven-qa-session-start.sh    kit: pixi and the locked environment in a cloud session
   .github/workflows/standards.yml   kit: the code standards, one job per group, one required check
   .github/workflows/ci.yml          its own: the gate lane (step 5) and any lanes of its own
   .github/rulesets/main.json        its own: names its required checks
@@ -370,7 +370,7 @@ decorators, runs the commands, carries the kit and registers the plugin):
      "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"},
     {"repository": "OpenSpineConsortium/beethoven-qa", "export": "cli", "version": 3,
      "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"},
-    {"repository": "OpenSpineConsortium/beethoven-qa", "export": "kit", "version": 2,
+    {"repository": "OpenSpineConsortium/beethoven-qa", "export": "kit", "version": 3,
      "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"},
     {"repository": "OpenSpineConsortium/beethoven-qa", "export": "plugin", "version": 1,
      "into": "vendor/beethoven-qa", "origin": "vendor/beethoven-qa/ORIGIN"}
@@ -570,7 +570,7 @@ rules (beethoven-research's are the model):
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/session-start.sh",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/beethoven-qa-session-start.sh",
             "timeout": 900
           }
         ]
@@ -762,7 +762,7 @@ dialog, which a cloud session never shows; no thread has tried it.
      duplication group's floor is jscpd's: 10 lines and 40 of its tokens.
    - **The kit is at version 2.** All five files are still the kit: `.githooks/pre-push`,
      `.github/workflows/automerge.yml`, `.github/workflows/rulesets.yml`,
-     `.claude/hooks/session-start.sh` and `.github/workflows/standards.yml`; three of them change
+     `.claude/hooks/session-start.sh` (renamed in 6.0.0) and `.github/workflows/standards.yml`; three of them change
      (`standards.yml` checks the pixi download against its digest and gains the `scorecard
      (report)` job, which is not a required check; `session-start.sh` checks the same download;
      `automerge.yml` says what the strict policy below means). `--kit` takes all five. The
@@ -782,6 +782,25 @@ dialog, which a cloud session never shows; no thread has tried it.
    - **The `cli` export is at version 3** (`report` added; `--report-all` the default): change
      the import in the repository's `interface/INTERFACE.json`, or the boundary lane says the copy
      no longer offers `cli` version 2.
+   **From 5.0.0 to 6.0.0**: the kit's session-start hook is renamed
+   `.claude/hooks/beethoven-qa-session-start.sh`, so that a repository which already has a
+   `.claude/hooks/session-start.sh` of its own, as every repository made from
+   OpenSpineConsortium/symphony-template does (its hook fetches and prints the board), can carry
+   the kit without that file being overwritten and without `vendor-check` failing on it. A copy
+   of 5.0.0 cannot take it: its `vendor` keeps only the kit paths it knows and refuses the
+   release as an incomplete kit, so this once, as for 3.0.0, step 1's second form runs the
+   command from a clone of 6.0.0 (`pixi run --locked --manifest-path <clone>/pixi.toml python
+   -m beethoven_qa vendor --into . --ref v6.0.0 --kit`); every release after is taken by the
+   consumer's own copy. Then, in the same change: delete the live `.claude/hooks/session-start.sh`
+   at the repository's root where it was the kit's, by hand, since the command lists only the
+   copy's own dropped file, `vendor/beethoven-qa/kit/.claude/hooks/session-start.sh`, and
+   `vendor-check` never looks at a live file outside the kit (a repository whose file at that
+   path is its own keeps it); change the hook's command in the repository's own
+   `.claude/settings.json` to the new name (step 6); and raise the `kit` import in
+   `interface/INTERFACE.json` to version 3, or the boundary lane says the copy no longer offers
+   `kit` version 2. The hook's text, the other four files, the dependency lines and the `cli`
+   export are unchanged. A Symphony repository names both hooks in its `SessionStart` list, its
+   own first.
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
    old and the new release; then a pull request, ready for review, which merges when the gate is
    green. A red gate after an update is reported red and fixed at its cause, in the consumer's code
@@ -795,7 +814,7 @@ dialog, which a cloud session never shows; no thread has tried it.
   way a container lane gives `safe.directory`, is kept), fails both (measured 2026-10-04: one
   added line in the copy, and one in `.githooks/pre-push`, each failed it); a kit hook that lost
   its executable bit on disk, and one
-  that git records without it (`.githooks/pre-push` and `.claude/hooks/session-start.sh` must be
+  that git records without it (`.githooks/pre-push` and `.claude/hooks/beethoven-qa-session-start.sh` must be
   `100755` in git's own index, live and under `kit/`: a checkout with `core.fileMode=false`, such
   as WSL on `/mnt/c`, commits a new hook as `100644`, every clone then has a hook git skips with
   only a hint, and the printed `git update-index --chmod=+x` line fixes the record); a byte-code

@@ -100,7 +100,7 @@ jobs:
         # One file per call: bash -n parses its first operand only and makes the rest positional
         # parameters, so one call over both files checked the hook alone (measured 2026-10-04).
         run: |
-          for f in .githooks/pre-push .claude/hooks/session-start.sh; do bash -n "$f" || exit 1; done
+          for f in .githooks/pre-push .claude/hooks/beethoven-qa-session-start.sh; do bash -n "$f" || exit 1; done
 
   plugin:
     # The plugin and its marketplace validate the way Claude Code reads them, and every saved

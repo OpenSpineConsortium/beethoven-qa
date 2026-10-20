@@ -28,7 +28,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 HOOKS = REPO / ".githooks"
 CI = REPO / ".github" / "workflows" / "ci.yml"
-KIT_SHELL = (".githooks/pre-push", ".claude/hooks/session-start.sh")
+KIT_SHELL = (".githooks/pre-push", ".claude/hooks/beethoven-qa-session-start.sh")
 
 
 @functools.cache
@@ -362,7 +362,7 @@ def _hook(tmp_path: Path, bin_dir: Path) -> subprocess.CompletedProcess[str]:
     env["CLAUDE_PROJECT_DIR"] = str(project)
     subprocess.run(["git", "init", "-q", str(project)], check=True, env=env)
     return subprocess.run(
-        ["bash", str(REPO / ".claude" / "hooks" / "session-start.sh")],
+        ["bash", str(REPO / ".claude" / "hooks" / "beethoven-qa-session-start.sh")],
         capture_output=True,
         text=True,
         env=env,
@@ -413,7 +413,7 @@ def test_the_hook_keeps_a_pixi_whose_digest_is_the_one_measured(tmp_path: Path) 
     # hook file itself stands in, and that is the refusing branch.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    hook = REPO / ".claude" / "hooks" / "session-start.sh"
+    hook = REPO / ".claude" / "hooks" / "beethoven-qa-session-start.sh"
     measured = re.search(r"^PIXI_SHA256=([0-9a-f]{64})$", hook.read_text(), re.MULTILINE)
     assert measured is not None
     found = shutil.which("pixi") or str(Path.home() / ".pixi" / "bin" / "pixi")
