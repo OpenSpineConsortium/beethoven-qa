@@ -74,7 +74,8 @@ Anthropic product; "Claude" and "Claude Code" are Anthropic's marks, used here t
   product is described. Never use the word that starts "prov" and ends "enance" for the history of
   a file or data; say origin, source, lineage or record (the pinned copy's record is `ORIGIN`).
   Versions are integers (1.0.0); `pyproject.toml`, `beethoven_qa.__version__`, the plugin manifest
-  and the release tag carry the same one.
+  and the release tag carry the same one, and the tag is made by `.github/workflows/release.yml`
+  when the change that raised the version merges to `main`, never by hand (greg, 2026-10-20).
 
 ## The definition of done (Goal 1) — what this repository exists to enforce
 
