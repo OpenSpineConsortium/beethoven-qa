@@ -1,0 +1,73 @@
+name: release
+# A release is cut by this workflow, never by hand: when a change that raised the version in
+# pyproject.toml merges to main, the run tags that commit v<version> and publishes the release,
+# with notes GitHub generates from the pull requests since the last tag. A consumer then takes it
+# with `python -m beethoven_qa vendor --ref v<version>` (docs/CONSUMING.md), and its ORIGIN names
+# a tag instead of "untagged".
+#
+# The commit is already tested: main takes only pull requests whose required checks were green on
+# the tree main now holds (.github/rulesets/main.json is strict), so no check is repeated here. A
+# version that already has its tag is left alone, so a push that raises nothing does nothing and a
+# rerun is harmless; a version the three carriers disagree on (pyproject.toml,
+# beethoven_qa.__version__ and the plugin manifest) is refused with the three values printed,
+# since the release would name a version the code does not. Two pull requests that each raise
+# the version merge one after the other, each tagging its own commit.
+#
+# A release made with GITHUB_TOKEN starts no other workflow, by GitHub's rule, which is what is
+# wanted: nothing of ours runs on a tag.
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+      - src/beethoven_qa/__init__.py
+      - plugin/.claude-plugin/plugin.json
+      - .github/workflows/release.yml
+
+# Nothing at the top; the one job that writes says so (OpenSSF Scorecard's Token-Permissions).
+permissions: {}
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: the one version every carrier agrees on
+        id: version
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, re, tomllib
+          with open("pyproject.toml", "rb") as f:
+              pyproject = tomllib.load(f)["project"]["version"]
+          with open("src/beethoven_qa/__init__.py", encoding="utf-8") as f:
+              module = re.search(r'^__version__ = "([^"]+)"', f.read(), re.M).group(1)
+          with open("plugin/.claude-plugin/plugin.json", encoding="utf-8") as f:
+              plugin = json.load(f)["version"]
+          carriers = {"pyproject.toml": pyproject, "beethoven_qa.__version__": module, "plugin.json": plugin}
+          if len(set(carriers.values())) != 1:
+              raise SystemExit("the version carriers disagree, so nothing is released: " + json.dumps(carriers))
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", pyproject):
+              raise SystemExit(f"not an integer version (1.0.0): {pyproject!r}")
+          print(f"version={pyproject}")
+          PY
+      - name: tag and publish, unless the tag is there
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if at=$(gh api "repos/$REPO/git/ref/tags/$tag" --jq .object.sha 2>/dev/null); then
+            echo "$tag already stands at $at; nothing to release"
+            exit 0
+          fi
+          gh release create "$tag" --repo "$REPO" --target "$SHA" --title "$tag" --generate-notes
+          echo "released $tag at $SHA"

@@ -682,7 +682,9 @@ dialog, which a cloud session never shows; no thread has tried it.
 
 1. **In beethoven-qa**, a release is a tag on `main`, an integer version (`v2.0.0`), with
    `__version__` in `src/beethoven_qa/__init__.py`, `version` in `pyproject.toml` and `version` in
-   `plugin/.claude-plugin/plugin.json` changed together. The last one matters on laptops: a plugin
+   `plugin/.claude-plugin/plugin.json` changed together. Nobody tags by hand: when the pull request
+   that raised them merges, `.github/workflows/release.yml` tags that commit and publishes the
+   release, and refuses a version the three disagree on. The last one matters on laptops: a plugin
    installed from a git marketplace stays on its cached copy until that string changes (marketplace
    hosting page, "Release a new version"), and the update arrives with
    `/plugin marketplace update beethoven-qa` or `claude plugin update beethoven-qa@beethoven-qa`.
