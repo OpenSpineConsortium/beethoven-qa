@@ -295,8 +295,9 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   7.0.0 changes `automerge.yml`: where the repository has the SymphonyBoard App (`SDLC_APP_ID`,
   `SDLC_APP_PRIVATE_KEY`) it arms auto-merge with the App's installation token, so the merge
   starts `main`'s workflows and closes its issue, which a merge armed with `GITHUB_TOKEN` never
-  did (SchwingNet #174 and #167, 2026-10-23); without the App it arms with `GITHUB_TOKEN` as
-  before.
+  did (SchwingNet #174 and #167, 2026-10-23); without the App, and for a pull request that
+  changes a workflow file (the token holds no workflows permission), it arms with
+  `GITHUB_TOKEN` as before.
 - `plugin/` and `.claude-plugin/marketplace.json`: the Claude Code plugin `beethoven-qa` (skills,
   the `stream` agent, the workflows `gate-until-green`, `verify-module`, `improve-module`, and from
   4.0.0 the code standards' `PostToolUse` hook under `plugin/hooks/`). On a

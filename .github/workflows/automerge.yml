@@ -20,10 +20,10 @@ name: automerge
 # issue its "Closes #N" names open (measured 2026-10-23 in OpenSpineConsortium/SchwingNet, #174 and
 # #167). So where the repository has the SymphonyBoard App (the variable SDLC_APP_ID and the secret
 # SDLC_APP_PRIVATE_KEY, as a Symphony repository does), it arms with the App's installation token
-# for this repository alone, and the merge starts main's workflows like a person's. The token asks
-# for workflows too, since merging a change to .github/workflows/ needs it, and an installation
-# that does not grant it is asked again without; with no App, no token, or an App that may not
-# arm, it arms with GITHUB_TOKEN as before.
+# for this repository alone (contents and pull requests, which a merge needs), and the merge
+# starts main's workflows like a person's. The token holds no workflows permission, so a pull
+# request that changes a file under .github/workflows/ is armed with GITHUB_TOKEN, as is every
+# pull request where there is no App, no token, or an App that may not arm.
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
@@ -52,24 +52,11 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: write
-          permission-workflows: write
-      - name: the App's token without workflows, where the installation does not grant them
-        id: app-core
-        if: ${{ vars.SDLC_APP_ID != '' && steps.app.outputs.token == '' }}
-        continue-on-error: true
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          app-id: ${{ vars.SDLC_APP_ID }}
-          private-key: ${{ secrets.SDLC_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: write
       - name: arm auto-merge when main requires the checks
         env:
           GH_TOKEN: ${{ github.token }}
-          ARM_TOKEN: ${{ steps.app.outputs.token || steps.app-core.outputs.token || github.token }}
-          ARMED_BY: ${{ (steps.app.outputs.token || steps.app-core.outputs.token) && 'the SymphonyBoard App, so the merge starts main''s workflows' || 'GITHUB_TOKEN, so the merge starts no workflow on main' }}
+          APP_TOKEN: ${{ steps.app.outputs.token }}
+          PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           BASE: ${{ github.event.pull_request.base.ref }}
           PR_ID: ${{ github.event.pull_request.node_id }}
@@ -79,6 +66,18 @@ jobs:
           if [ "${n:-0}" = 0 ]; then
             echo "::notice::$BASE has no required-checks rule yet (.github/rulesets/main.json is not applied), so auto-merge stays off: armed now, it would merge before the tests."
             exit 0
+          fi
+          # A change to a workflow file is armed with GITHUB_TOKEN: the App's token holds no
+          # workflows permission, so a token that starts workflows never lands one.
+          ARM_TOKEN="$GH_TOKEN"
+          ARMED_BY="GITHUB_TOKEN, so the merge starts no workflow on main"
+          if [ -n "${APP_TOKEN:-}" ]; then
+            if w=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename | select(startswith(".github/workflows/"))') && [ -z "$w" ]; then
+              ARM_TOKEN="$APP_TOKEN"
+              ARMED_BY="the SymphonyBoard App, so the merge starts main's workflows"
+            else
+              echo "::notice::the pull request changes a workflow file (or its files could not be read), so GITHUB_TOKEN arms it"
+            fi
           fi
           arm() {
             GH_TOKEN="$1" gh api graphql -f query='mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: MERGE}) { pullRequest { number autoMergeRequest { enabledAt } } } }' -f id="$PR_ID" 2>&1
