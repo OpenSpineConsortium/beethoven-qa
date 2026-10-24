@@ -538,7 +538,12 @@ person clicks Update branch or merges `main` into it. The kit's `scorecard (repo
 by no rule: it reports and never blocks.
 
 The kit's `rulesets.yml` applies that file with the `RULESETS_TOKEN` secret, and the kit's
-`automerge.yml` arms auto-merge only once `main` carries a required-checks rule. So a new repository
+`automerge.yml` arms auto-merge only once `main` carries a required-checks rule. It arms with
+the SymphonyBoard App's installation token where the repository has the variable `SDLC_APP_ID`
+and the secret `SDLC_APP_PRIVATE_KEY` (from 7.0.0), since GitHub starts no workflow for a merge
+made as `GITHUB_TOKEN`: such a merge runs none of `main`'s push workflows and leaves its issue
+open. Without them, and for a pull request that changes a workflow file, it arms with
+`GITHUB_TOKEN`. So a new repository
 needs greg's hand once (`plan/REPO_SPLIT.md` section 5): **Allow auto-merge** ticked, the secret
 shared with the repository, and pull request #1 merged by hand when green, which applies the rule.
 Every later pull request is opened ready for review, never as a draft, and merges itself when the
@@ -803,6 +808,15 @@ dialog, which a cloud session never shows; no thread has tried it.
    `kit` version 2. The hook's text, the other four files, the dependency lines and the `cli`
    export are unchanged. A Symphony repository names both hooks in its `SessionStart` list, its
    own first.
+   **From 6.0.0 to 7.0.0**: the kit's `automerge.yml` arms auto-merge with the SymphonyBoard
+   App's installation token where the repository has the variable `SDLC_APP_ID` and the secret
+   `SDLC_APP_PRIVATE_KEY`, as a Symphony repository does, so each merge starts `main`'s push
+   workflows and closes the issue its "Closes #N" names; a merge armed with `GITHUB_TOKEN` does
+   neither, by GitHub's rule (measured in SchwingNet, #174 and #167, 2026-10-23). The token asks
+   for contents and pull requests on the repository alone and never for workflows, so a pull
+   request that changes a file under `.github/workflows/` is armed with `GITHUB_TOKEN`, as is
+   every pull request where there is no App or the App may not arm. Take it with `--ref v7.0.0 --kit`; the other four kit files,
+   the dependency lines and every export's version are unchanged.
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
    old and the new release; then a pull request, ready for review, which merges when the gate is
    green. A red gate after an update is reported red and fixed at its cause, in the consumer's code

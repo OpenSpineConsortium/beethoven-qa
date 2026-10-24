@@ -51,8 +51,10 @@ Anthropic product; "Claude" and "Claude Code" are Anthropic's marks, used here t
   C7). Nothing here treats them as an option or a default; a spent window is waited out.
 - **No code on claude.ai and no interception of it.** No proxy, no parser of its traffic, nothing.
 - **Secrets never appear on a command line, in argv, in logs, in job files or in `sbatch --export`.**
-  Never echo one. The only secret any workflow here names is the maintainer's `RULESETS_TOKEN`,
-  read from the Actions secret into the environment of the one step that needs it.
+  Never echo one. The only secrets any workflow here names are the maintainer's `RULESETS_TOKEN`,
+  read from the Actions secret into the environment of the one step that needs it, and, from
+  7.0.0, the SymphonyBoard App's `SDLC_APP_PRIVATE_KEY`, handed only to
+  `actions/create-github-app-token` in `automerge.yml` (greg, 2026-10-24, SchwingNet #239).
 - **No remote code.** No `eval`, no `new Function`, no fetched-and-run scripts.
   `tools/check_workflows.mjs` checks the workflow scripts with `node --check` on two copies of
   the wrapped text (the script grammar and the module grammar, the two the runtime uses), never
@@ -289,7 +291,13 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   unchanged), because a repository made from OpenSpineConsortium/symphony-template already has
   a `.claude/hooks/session-start.sh` of its own, which the kit at the old name overwrote and
   `vendor-check` then refused; a consumer names the hook's new path in its own
-  `.claude/settings.json`, and a Symphony repository names both hooks, its own first.
+  `.claude/settings.json`, and a Symphony repository names both hooks, its own first. Release
+  7.0.0 changes `automerge.yml`: where the repository has the SymphonyBoard App (`SDLC_APP_ID`,
+  `SDLC_APP_PRIVATE_KEY`) it arms auto-merge with the App's installation token, so the merge
+  starts `main`'s workflows and closes its issue, which a merge armed with `GITHUB_TOKEN` never
+  did (SchwingNet #174 and #167, 2026-10-23); without the App, and for a pull request that
+  changes a workflow file (the token holds no workflows permission), it arms with
+  `GITHUB_TOKEN` as before.
 - `plugin/` and `.claude-plugin/marketplace.json`: the Claude Code plugin `beethoven-qa` (skills,
   the `stream` agent, the workflows `gate-until-green`, `verify-module`, `improve-module`, and from
   4.0.0 the code standards' `PostToolUse` hook under `plugin/hooks/`). On a
