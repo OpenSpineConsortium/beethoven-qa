@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from beethoven_qa.standards.run import GROUPS
+
 REPO = Path(__file__).resolve().parent.parent
 HOOKS = REPO / ".githooks"
 CI = REPO / ".github" / "workflows" / "ci.yml"
@@ -289,6 +291,19 @@ def test_main_is_merged_only_from_a_branch_that_carries_it() -> None:
     required = {c["context"] for c in checks["parameters"]["required_status_checks"]}
     assert "standards (every group green)" in required
     assert "scorecard (report)" not in required  # it reports, it never blocks
+
+
+def test_the_required_standards_job_runs_every_group_as_a_step_of_its_own() -> None:
+    # From 8.0.0 the groups are steps of the one required job, not jobs of their own, since GitHub
+    # bills each job by the whole minute: a group the package knows with no step here would pass
+    # every pull request unmeasured, and a step for a group it does not know would fail them all.
+    lines = (REPO / ".github" / "workflows" / "standards.yml").read_text().splitlines()
+    start = lines.index("    name: standards (every group green)")
+    end = next(i for i in range(start, len(lines)) if lines[i].startswith("  scorecard:"))
+    command = re.compile(r"run: pixi run --locked python -m beethoven_qa standards ([a-z-]+) ")
+    run = [m.group(1) for line in lines[start:end] if (m := command.search(line))]
+    assert sorted(run) == sorted(GROUPS)
+    assert not any(line.strip().startswith("matrix:") for line in lines)
 
 
 @pytest.mark.parametrize(

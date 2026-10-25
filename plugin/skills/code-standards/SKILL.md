@@ -6,7 +6,7 @@ description: Use when writing or changing Python code or GitHub workflows in a r
 # Writing to the code standards
 
 `python -m beethoven_qa standards <group>|all` (the `standards` lane of `pixi run --locked gate`,
-and one CI job per group with `standards (every group green)` the required check) blocks a change
+and in CI a step per group of `standards (every group green)`, the required check) blocks a change
 whose **new or changed code** breaks a limit below. Old findings the change does not make worse are
 reported and pass. The full account, with every limit's source, is `docs/STANDARDS.md` in
 beethoven-qa (in a consumer: `vendor/beethoven-qa/` holds the package; the document is in the

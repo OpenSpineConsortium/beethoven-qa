@@ -48,7 +48,7 @@ Anthropic's marks, used here to say what it runs.
   .github/workflows/automerge.yml   kit: auto-merge armed on every pull request opened ready
   .github/workflows/rulesets.yml    kit: .github/rulesets/*.json applied to GitHub
   .claude/hooks/beethoven-qa-session-start.sh    kit: pixi and the locked environment in a cloud session
-  .github/workflows/standards.yml   kit: the code standards, one job per group, one required check
+  .github/workflows/standards.yml   kit: the code standards, a step per group of one required check
   .github/workflows/ci.yml          its own: the gate lane (step 5) and any lanes of its own
   .github/rulesets/main.json        its own: names its required checks
   .claude/settings.json             its own: wires the session-start hook, worktree.baseRef
@@ -486,9 +486,10 @@ jobs:
         run: pixi run --locked symbolic
 ```
 
-The code standards run in the kit's `.github/workflows/standards.yml`, not in this file: one job
-per group, and `standards (every group green)`, green only when every group's is. The standards
-lane of the gate task runs them before a push too; CI runs them per group so a red one names itself.
+The code standards run in the kit's `.github/workflows/standards.yml`, not in this file: one job,
+`standards (every group green)`, with a step per group, green only when every group's step is. The
+standards lane of the gate task runs them before a push too; CI runs each group as a step of its own
+so a red one names itself.
 
 `.github/rulesets/main.json` names the gate job and `standards (every group green)` as required
 checks, each `context` exactly the job's `name` (a required check that no job reports under that
@@ -817,6 +818,17 @@ dialog, which a cloud session never shows; no thread has tried it.
    request that changes a file under `.github/workflows/` is armed with `GITHUB_TOKEN`, as is
    every pull request where there is no App or the App may not arm. Take it with `--ref v7.0.0 --kit`; the other four kit files,
    the dependency lines and every export's version are unchanged.
+   **From 7.0.0 to 8.0.0**: the kit's `standards.yml` runs the six groups as steps of one job,
+   `standards (every group green)`, the required check as before, in place of a job per group and
+   a seventh that waited for them. GitHub bills each job by the whole minute and a group takes
+   about 15 seconds, so a run cost eight billed minutes for under three of work (in SchwingNet on
+   2026-10-25, 834 billed minutes for 288 of work, the day the organization's included minutes ran
+   out). A group's step runs even after one before it failed, so a run still names every group
+   that fails. The SARIF logs are one artifact, `sarif`, and the `scorecard (report)` job runs on
+   `main` and by hand, not on a pull request. Take it with `--ref v8.0.0 --kit`: a ruleset that
+   names only `standards (every group green)`, as step 5's does, needs no change, and one that
+   names a `standards / <group>` job drops it. The other four kit files, the dependency lines and
+   every export's version are unchanged.
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
    old and the new release; then a pull request, ready for review, which merges when the gate is
    green. A red gate after an update is reported red and fixed at its cause, in the consumer's code
