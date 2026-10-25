@@ -120,10 +120,13 @@ pre-push hook's clean-tree rule holds. The command reads the package `[tool.beet
 measured.
 
 The `gate` task runs `standards` after the other lanes, so the pre-push hook holds every push to
-them. In CI the kit's `.github/workflows/standards.yml` runs one job per group (`standards /
-<group>`) and one job, `standards (every group green)`, which is green only when every group's is:
-that one is the required check in `.github/rulesets/main.json`, so a group added in a later release
-needs no change to the rule. The SARIF logs are kept as artifacts of the run for 30 days (the
+them. In CI the kit's `.github/workflows/standards.yml` runs one job, `standards (every group
+green)`, with a step per group, each run even after a group before it failed, so the job names
+every group that fails and is green only when every group's step is: that job is the required check
+in `.github/rulesets/main.json`, so a group added in a later release needs no change to the rule.
+Until 8.0.0 each group was a job of its own beside a seventh that waited for them; GitHub bills a
+job by the whole minute and a group takes about 15 seconds, so a run cost eight billed minutes for
+under three of work. The SARIF logs are kept as one artifact of the run, `sarif`, for 30 days (the
 supply-chain log holds two runs, the reader's and zizmor's). Nothing is uploaded to GitHub's code
 scanning: on a private repository it needs GitHub Code Security, which is not bought. The evidence
 report (`docs/REPORT.md`) runs the `standards` task with `--sarif` and counts each log's results
@@ -132,7 +135,8 @@ by level and by `baselineState`, beside the tools the log names.
 The same file has one job more, `scorecard (report)`, which runs OpenSSF Scorecard 5.5.0 over the
 checked-out tree (`--local`), prints the scores in its log and keeps the JSON as an artifact. It is
 not among the jobs the required check waits for and the ruleset does not name it: it reports, and
-blocks nothing. Why only a report: Scorecard scores whatever we do the two things this repository
+blocks nothing, so from 8.0.0 it runs on `main` and by hand and not on every pull request. Why
+only a report: Scorecard scores whatever we do the two things this repository
 accepts with open eyes, the `npm install -g` of the Claude Code CLI, which has no lockfile to pin
 it (Pinned-Dependencies 8 of 10 on 2026-10-08, the one warning), and the pixi download-then-run,
 which the reader now holds to a digest check where a digest exists (pixi publishes none, so the

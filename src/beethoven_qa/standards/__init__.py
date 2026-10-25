@@ -1,6 +1,6 @@
 """The code standards: each group of the Drive file "Auditable Code Quality Standards" (greg,
 2026-10-04) as its own check, run alone, passing or failing alone, and blocking a pull request
-alone (``.github/workflows/standards.yml``, one job per group).
+alone (``.github/workflows/standards.yml``, a step per group in its one required job).
 
 - ``readability``: cognitive complexity (Campbell), cyclomatic complexity (McCabe), parameters and
   function length in lizard's NLOC (Code Climate's limits).

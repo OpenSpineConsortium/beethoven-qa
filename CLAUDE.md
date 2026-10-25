@@ -140,8 +140,8 @@ workflow files, a digest check on every download a step goes on to use, and zizm
 its regular persona, High and Medium blocking; Scorecard itself runs in CI as a report that
 blocks nothing). Each is a module of
 `beethoven_qa.standards`, a group of `python -m beethoven_qa standards <group>|all`, a SARIF 2.1.0
-log and a job of the kit's `standards.yml`; each passes or fails alone, and the one required check
-is `standards (every group green)`. They are in this repository, not in six, because the pinned
+log and a step of the kit's `standards.yml` (a job of its own until 8.0.0); each passes or fails
+alone, and the one required check is `standards (every group green)`. They are in this repository, not in six, because the pinned
 copy already carries them to every consumer with one command and a new repository costs greg hand
 steps (greg asked for whatever is most logical; the coordinator's default was one package and one
 check per group here).
