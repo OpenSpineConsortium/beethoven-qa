@@ -114,7 +114,12 @@ No module is done, and the gate will not let it enter a run or reach `main`, unt
    else it refuses and says so in plain words; and it unsets the variables git exports to a hook
    (`git rev-parse --local-env-vars`, `GIT_DIR` among them) before the gate runs, so a push from a
    linked worktree never aims the tests' throwaway repositories at this one (`tests/test_hooks.py`
-   pins both with the real hook, a stub pixi and a bare remote). `SKIP_GATE=1` skips all of it
+   pins both with the real hook, a stub pixi and a bare remote). From 9.0.0 the hook exports
+   `BEETHOVEN_QA_BASE=auto` unless the person set it, so the proof covers only the modules the
+   change since the branch left `main` reaches (`beethoven_qa.scope`, below) and every other lane
+   runs whole: greg asked on 2026-10-25 why a push of a note waited sixteen minutes, fifteen of
+   them CrossHair re-proving a package the push never touched. `BEETHOVEN_QA_BASE=none` proves
+   every module. `SKIP_GATE=1` skips all of it
    only knowingly, and the commit says why. The same gate is the required
    check on `main` (`.github/rulesets/main.json`, applied by `rulesets.yml` with
    `RULESETS_TOKEN`); pull requests open ready for review, never as drafts; `automerge.yml` arms
@@ -185,6 +190,18 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   started through `python -m beethoven_qa._crosshair`, which makes icontract's bookkeeping set
   before CrossHair traces anything (Measured, 2026-10-09). `--module` limits
   both checks to one module (an entry of a deeper module stays that module's, imported or not).
+  `--base REF|auto|none` (from 9.0.0; its default is `BEETHOVEN_QA_BASE`, else `none`) narrows
+  check 2 alone to the modules the change since that commit reaches, and prints which (`gate:
+  proof: ...`): `beethoven_qa.scope` reads `git diff` and the package's imports, a module reaching
+  itself and every module that imports it however indirectly, a package's `__init__` everything
+  under it, a module that imports by a computed name every change, and `pyproject.toml`,
+  `pixi.toml`, `pixi.lock`, the gate's own files (`__init__`, `contracts`, `gate`, `scope`,
+  `_crosshair`, wherever the copy runs from), any other repository file the gate's process
+  imported from outside the package, a non-module file of the package's directory and a Python
+  file beside the package every module; anything else, a document, data, a test, a workflow,
+  reaches none. Check 1 always covers the whole package, a base that cannot be told proves every
+  module, and `--module` ignores the base. The pre-push hook passes `auto`; CI passes, on a pull
+  request, the newest commit of `main` whose run passed on a push, and on `main` none.
   Every run prints every condition's verdict, counts them under each target (`gate: <target>: <c>
   confirmed over all paths, <n> not confirmed within <T> s, <u> unable to meet a precondition`,
   right after its exit line) and over the run as the last line before the verdict (`gate:
@@ -458,6 +475,7 @@ pixi run --locked standards   # the code standards, every group, against where t
 pixi run --locked boundary    # the interface standard's five rules on this tree
 pixi run --locked report      # the evidence report into ./report (docs/REPORT.md): every lane again, about twenty minutes
 pixi run --locked python -m beethoven_qa gate --module beethoven_qa.vendor  # one module
+BEETHOVEN_QA_BASE=auto pixi run --locked symbolic  # only what the change since main reaches, as the hook proves
 pixi run hooks                # point git at .githooks (the session-start hook does this in a cloud session)
 ```
 
@@ -477,10 +495,10 @@ tree with uncommitted or untracked files: commit everything first.
   `__main__.py` (the command line; exempt from the contract rule as wiring and I/O), `standards/`
   (one module per group; `findings.py`, `newcode.py`, `sarif.py` and `group.py` shared; `run.py`
   the runner), `report.py` (the evidence report, `docs/REPORT.md`), `_crosshair.py` (what the
-  gate starts CrossHair through).
+  gate starts CrossHair through), `scope.py` (which modules a change reaches, for `--base`).
 - `tests/` — pytest under typeguard's import hook; `test_hooks.py` runs the kit's real pre-push
   hook with a stub pixi, a bare remote and a linked worktree; `test_crosshair_runner.py` the
-  runner.
+  runner; `test_scope.py` the narrowing, and `test_gate.py` the gate with a base on a git toy.
 - `plugin/` — the Claude Code plugin (`hooks/` holds the coaching hook); `.claude-plugin/marketplace.json` — the marketplace listing it.
 - `tools/name_failures.sh` — CI's account of a failed lane in the check's annotations (each failed
   CrossHair target with its error lines, what the gate refused, the runner);

@@ -455,10 +455,14 @@ jobs:
     name: gate (lock → lint, typecheck, tests, CrossHair/Z3, vendor-check)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read  # the proof's base, read from this workflow's runs (from 9.0.0)
     steps:
       # Pinned to a commit, the tag beside it (the supply-chain standard refuses a tag alone).
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          fetch-depth: 0  # the proof compares the change with a commit of main (from 9.0.0)
           persist-credentials: false
       - name: install pixi
         # Checked against its digest before it is made executable or run (the supply-chain
@@ -482,9 +486,35 @@ jobs:
         run: pixi run --locked typecheck
       - name: tests (typeguard enclave)
         run: pixi run --locked test
+      - name: the commit the proof starts from
+        id: base
+        # On a pull request (and a push, where main's own runs are narrowed too), the newest commit
+        # of main whose gate passed on a push: the proof covers only the modules the change since
+        # it reaches. A schedule or a run by hand proves every module, the backstop.
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          sha=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // empty' 2>/dev/null) || sha=
+          if [ -n "$sha" ] && git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+            echo "base=$sha" >> "$GITHUB_OUTPUT"
+          fi
       - name: symbolic verification (CrossHair + Z3)
+        env:
+          BEETHOVEN_QA_BASE: ${{ steps.base.outputs.base || 'none' }}
         run: pixi run --locked symbolic
 ```
+
+From 9.0.0 the gate proves, with a base, only the modules the change since it reaches
+(`--base`, `BEETHOVEN_QA_BASE`; the kit's pre-push hook passes `auto`). The step above gives it
+the newest commit of `main` whose gate passed on a push, so a pull request that changes a
+document, data or a test proves nothing again, and one that changes a module proves that module
+and what imports it. It needs the job to read the workflow's runs and the history, the job's
+`permissions` and the checkout's `fetch-depth: 0` above. Add `schedule:` (a daily cron) to `on:`
+for a full proof with no base, since CrossHair's search is bounded and timed and so not quite the
+same twice. Without the step the lane proves every module, as before 9.0.0.
 
 The code standards run in the kit's `.github/workflows/standards.yml`, not in this file: one job,
 `standards (every group green)`, with a step per group, green only when every group's step is. The
@@ -829,6 +859,19 @@ dialog, which a cloud session never shows; no thread has tried it.
    names only `standards (every group green)`, as step 5's does, needs no change, and one that
    names a `standards / <group>` job drops it. The other four kit files, the dependency lines and
    every export's version are unchanged.
+   **From 8.0.0 to 9.0.0**: the gate takes `--base REF|auto|none`, its default the variable
+   `BEETHOVEN_QA_BASE`, else `none`, and with a base the proof (check 2) covers only the modules
+   the change since that commit reaches, printing which on a line `gate: proof: ...`; check 1
+   still covers the whole package. A change to `pyproject.toml`, `pixi.toml`, `pixi.lock` or the
+   pinned copy proves every module, and a document, data, a test or a workflow proves none, so a
+   push of a note takes the minute of the other lanes rather than the proof's quarter of an hour
+   (`src/beethoven_qa/scope.py` gives the whole rule). The kit's `.githooks/pre-push` exports
+   `BEETHOVEN_QA_BASE=auto` unless it is set; nothing else in the kit changes. Take it with
+   `--ref v9.0.0 --kit`. CI keeps proving every module until its symbolic step is given a base:
+   step 5's lane shows the step that reads one, the newest commit of `main` whose gate passed on
+   a push, which needs `actions: read` and the history (`fetch-depth: 0`); a full run on a
+   schedule, with no base, stays the backstop. The `cli` export gains an option and a variable
+   and keeps its version.
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
    old and the new release; then a pull request, ready for review, which merges when the gate is
    green. A red gate after an update is reported red and fixed at its cause, in the consumer's code

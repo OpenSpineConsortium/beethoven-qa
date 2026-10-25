@@ -32,6 +32,7 @@ from pathlib import Path
 from types import ModuleType
 
 from beethoven_qa.gate import GateConfig
+from beethoven_qa.scope import _resolve
 from beethoven_qa.standards import (
     coverage,
     design,
@@ -52,33 +53,6 @@ __all__ = ["GROUPS"]
 GROUPS: dict[str, ModuleType] = {
     m.GROUP.name: m for m in (readability, design, duplication, coverage, security, supply_chain)
 }
-
-
-def _commit(root: Path, ref: str) -> str:
-    return _git(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").strip()
-
-
-def _resolve(root: Path, base: str) -> str | None:
-    # The base commit, or None for no base; ValueError when it cannot be told.
-    if base == "none":
-        return None
-    if base != "auto":
-        try:
-            return _commit(root, base)
-        except subprocess.CalledProcessError:
-            raise ValueError(f"{base} is not a commit of this repository") from None
-    candidates = ["refs/remotes/origin/main", "refs/remotes/origin/master"]
-    try:
-        named = _git(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD").strip()
-        candidates.insert(0, named)
-    except subprocess.CalledProcessError:
-        pass
-    for ref in candidates:
-        try:
-            return _git(root, "merge-base", "HEAD", _commit(root, ref)).strip()
-        except subprocess.CalledProcessError:
-            continue
-    raise ValueError("the remote's default branch is not known here; pass --base <commit>")
 
 
 def _untracked(root: Path) -> list[tuple[str, Ranges]]:

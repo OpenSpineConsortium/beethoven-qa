@@ -36,9 +36,15 @@ jobs:
     # Measured on 5.0.0's pull request (2026-10-09): the tests 2 min 30 s, the symbolic lane
     # 26 min over 56 targets, the job 28 min 45 s, so 30 would stop it at the next few targets.
     timeout-minutes: 60
+    permissions:
+      contents: read
+      # The proof's base on a pull request is read from this workflow's own runs (below).
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # The proof on a pull request compares the change with a commit of main.
+          fetch-depth: 0
           persist-credentials: false
       - name: install pixi
         # The digest is checked before the file is made executable or run; a file that is not the
@@ -74,8 +80,32 @@ jobs:
         run: |
           set -o pipefail
           pixi run --locked boundary 2>&1 | tee "$RUNNER_TEMP/boundary.txt"
+      - name: the commit the proof starts from
+        id: base
+        # On a pull request, the newest commit of main whose run of this workflow passed on a
+        # push, where every module was proven: the proof then covers only the modules the change
+        # since it reaches (src/beethoven_qa/scope.py says what reaches what). On main and by hand,
+        # none: every module, so each release carries the whole proof. No such commit, or one
+        # the clone lacks, is none too.
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          base=none
+          if [ "$EVENT" = pull_request ]; then
+            sha=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+              --jq '.workflow_runs[0].head_sha // empty' 2>/dev/null) || sha=
+            if [ -n "$sha" ] && git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+              base=$sha
+            fi
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "the proof starts from: $base"
       - name: symbolic verification (CrossHair + Z3)
         id: symbolic
+        env:
+          BEETHOVEN_QA_BASE: ${{ steps.base.outputs.base }}
         run: |
           set -o pipefail
           pixi run --locked symbolic 2>&1 | tee "$RUNNER_TEMP/symbolic.txt"

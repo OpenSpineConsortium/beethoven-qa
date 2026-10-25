@@ -77,7 +77,16 @@ from beartype import beartype
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator, model_validator
 
 from beethoven_qa.contracts import ensure, require
-from beethoven_qa.vendor import is_safe_relpath
+from beethoven_qa.scope import (
+    ROOT_FILES,
+    _changed,
+    _graph,
+    _resolve,
+    module_named,
+    reached,
+    reaches_every_module,
+)
+from beethoven_qa.vendor import _toplevel, is_safe_relpath
 
 __all__ = [
     "FunctionEntry",
@@ -824,10 +833,113 @@ def _report(
     return failed, totals, problems
 
 
-def _run(root: Path, only: str | None = None) -> int:
+def _prove(
+    root: Path, config: GateConfig, targets: list[str], jobs: int
+) -> list[subprocess.CompletedProcess[str]]:
+    # Each condition may take up to its whole bound when its inputs are unbounded (strings, tuples),
+    # so one CrossHair process over the package costs the sum of every bound; one process per
+    # function or class, ``jobs`` at a time, costs about the largest.
+    timeout = config.per_condition_timeout
+    pythonpath = os.pathsep.join(
+        p for p in (str(root / config.src), os.environ.get("PYTHONPATH", "")) if p
+    )
+    env = {**os.environ, "PYTHONPATH": pythonpath}
+
+    def prove(target: str) -> subprocess.CompletedProcess[str]:
+        cmd = crosshair_command(sys.executable, target, timeout)
+        return subprocess.run(cmd, env=env, cwd=root, capture_output=True, text=True, check=False)
+
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        return list(pool.map(prove, targets))
+
+
+def _how_many(chosen: list[str], targets: list[str]) -> str:
+    # How many targets are proven, out of how many when the change since a base chose fewer.
+    if len(chosen) == len(targets):
+        return str(len(targets))
+    return f"{len(chosen)} of {len(targets)} (those in the modules the change reaches)"
+
+
+# The gate's own files, beside this module wherever the copy the gate runs from sits: the package's
+# start, the contract decorators, the gate, the narrowing and the runner CrossHair starts through.
+_OWN_FILES = ("__init__.py", "contracts.py", "gate.py", "scope.py", "_crosshair.py")
+
+
+def _imported_files() -> set[Path]:
+    # The file of every module this process has imported, where the import found it.
+    files = (getattr(module, "__file__", None) for module in list(sys.modules.values()))
+    return {Path(file).resolve() for file in files if isinstance(file, str)}
+
+
+def _everywhere(root: Path, config: GateConfig) -> frozenset[str]:
+    # The files of the repository every proof reads: the root files, the gate's own (inside the
+    # package when the gate checks itself), and any other the gate's process imported from outside
+    # the package (the rest of a pinned copy, a module the package imports from beside it). A
+    # module of the environment sits in no file git tracks, so it never matches a change.
+    home = (root / config.src / config.package).resolve()
+    own = {Path(__file__).resolve().parent / name for name in _OWN_FILES}
+    beside = {path for path in _imported_files() if not path.is_relative_to(home)}
+    inside = {
+        path.relative_to(root).as_posix() for path in own | beside if path.is_relative_to(root)
+    }
+    return ROOT_FILES | inside
+
+
+def _changes(root: Path, base: str) -> tuple[str, tuple[str, ...]]:
+    # The base commit and every file changed since it; ValueError, OSError or git's own error when
+    # it cannot be told, as from a gate root that is not the repository's top level, whose paths
+    # git would give from elsewhere.
+    if _toplevel(root) != root:
+        raise ValueError(f"{root} is not the top level of a git repository")
+    commit = _resolve(root, base)
+    if commit is None:
+        raise ValueError("no base")
+    return commit, _changed(root, commit)
+
+
+def _reach(root: Path, config: GateConfig, base: str) -> tuple[frozenset[str] | None, str]:
+    # The modules check 2 proves, None for every one, and the line that says why; with no base,
+    # every module and nothing to say, as the gate ran before it took one (beethoven_qa.scope).
+    if base == "none":
+        return None, ""
+    try:
+        commit, changed = _changes(root, base)
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        return None, f"every module, as what changed since {base} cannot be told: {exc}"
+    since = f"since {commit[:12]}"
+    where = (config.src, config.package)
+    everywhere = _everywhere(root, config)
+    wide = [path for path in changed if reaches_every_module(path, *where, everywhere)]
+    if wide:
+        return None, f"every module: {wide[0]} changed {since}, and every proof reads it"
+    graph = _graph(root, *where)
+    named = frozenset(m for path in changed if (m := module_named(path, *where)) is not None)
+    modules = reached(named, graph.imports, graph.dynamic)
+    counted = f"{len(modules)} of {len(graph.imports)} modules"
+    return modules, f"{counted}, those the change {since} reaches: {_listed(modules)}"
+
+
+def _listed(modules: frozenset[str]) -> str:
+    return ", ".join(sorted(modules)) or "none"
+
+
+def _chosen(root: Path, config: GateConfig, targets: list[str], base: str) -> list[str]:
+    # The targets check 2 proves: every one, or with a base only those of the modules the change
+    # since it reaches, a target being named by the module that counts it.
+    modules, why = _reach(root, config, base)
+    if why:
+        print(f"gate: proof: {why}")
+    if modules is None:
+        return targets
+    return [target for target in targets if target.rpartition(".")[0] in modules]
+
+
+def _run(root: Path, only: str | None = None, base: str = "none") -> int:
     # Both checks for the repository at ``root``, or for its module ``only``; 0 when both pass, 2
-    # when ``only`` is not a checked module of the package. Private and uncontracted on purpose: it
-    # imports the package and starts CrossHair, which CrossHair must never do itself.
+    # when ``only`` is not a checked module of the package. With a ``base`` other than none, check
+    # 2 proves only the modules the change since it reaches (beethoven_qa.scope); the command line
+    # gives none under --module. Private and uncontracted on purpose: it imports the package and
+    # starts CrossHair, which CrossHair must never do itself.
     config = GateConfig.from_pyproject(root)
     exempt = frozenset(config.exempt)
     found = _modules(config, root)
@@ -863,9 +975,6 @@ def _run(root: Path, only: str | None = None) -> int:
         problems.append("public functions without contracts (nothing to prove):")
         problems += [f"  - {name}" for name in missing]
 
-    # Each condition may take up to its whole bound when its inputs are unbounded (strings, tuples),
-    # so one CrossHair process over the package costs the sum of every bound; one process per
-    # function or class, as many at a time as there are cores, costs about the largest.
     functions, classes, bare = _targets(modules, config.package)
     scope = only or config.package
     # Under --module, every entry under the module is that module's and is reported there, never
@@ -893,28 +1002,19 @@ def _run(root: Path, only: str | None = None) -> int:
     ]
     if not targets:
         problems.append(f"nothing to prove in {scope}: no contracted function or class")
+    chosen = _chosen(root, config, targets, base)
     jobs = _jobs()
     timeout = config.per_condition_timeout
     print(
-        f"gate: CrossHair + Z3 over {scope}: {len(targets)} contracted functions and classes, "
-        f"{jobs} at a time, {timeout} s per condition"
+        f"gate: CrossHair + Z3 over {scope}: {_how_many(chosen, targets)} contracted functions "
+        f"and classes, {jobs} at a time, {timeout} s per condition"
     )
     if bare:
         print(f"gate: classes with no contracts, nothing to check: {', '.join(bare)}")
     for name in sorted(set(listed) - set(misnamed) - set(stale)):
         print(f"gate: not proven, contracts checked at run time only: {name}: {listed[name]}")
-    pythonpath = os.pathsep.join(
-        p for p in (str(root / config.src), os.environ.get("PYTHONPATH", "")) if p
-    )
-    env = {**os.environ, "PYTHONPATH": pythonpath}
-
-    def prove(target: str) -> subprocess.CompletedProcess[str]:
-        cmd = crosshair_command(sys.executable, target, timeout)
-        return subprocess.run(cmd, env=env, cwd=root, capture_output=True, text=True, check=False)
-
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        results = list(pool.map(prove, targets))
-    failed, totals, refused = _report(targets, results, timeout)
+    results = _prove(root, config, chosen, jobs)
+    failed, totals, refused = _report(chosen, results, timeout)
     problems += refused
     for line in problems:
         print(line if line.startswith("  - ") else f"gate: {line}")
