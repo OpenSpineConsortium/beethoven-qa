@@ -6,8 +6,9 @@ description: Use before writing or changing a Python module in any repository th
 # The definition of done
 
 No module enters a run until it clears every step below. The first four are checked on every push
-(the pre-push hook's `pixi run --locked gate`) and in CI (`pixi install --locked`, then the gate's
-lanes); the last two are how the work is done.
+(the pre-push hook's `pixi run --locked gate`, whose proof of step 4 covers the modules the change
+reaches) and in CI (`pixi install --locked`, then the gate's lanes); the last two are how the work
+is done.
 Every repository runs the same gate: beethoven-qa from its own `src/`, a consuming repository from
 its pinned copy at `vendor/beethoven-qa/` (never edited by hand; `vendor-check` fails one that was).
 
@@ -114,6 +115,10 @@ per_condition_timeout = 20          # seconds per condition, 1 to 600: the decla
   is the `code-standards` skill.
 - `pixi run --locked symbolic` is `python -m beethoven_qa gate`: both checks over the whole package,
   the contract rule and CrossHair at the declared bound. Both always run, and it fails on either.
+  With a base (`--base <ref>`, or `BEETHOVEN_QA_BASE`, which the pre-push hook sets to `auto`),
+  CrossHair proves only the modules the change since that commit reaches, their importers among
+  them, and every module where the change touches what every proof reads; the contract rule still
+  covers the whole package.
 - One module, every condition's verdict: `pixi run --locked python -m beethoven_qa gate --module
   <package>.<module> --report-all`, the dotted name of `src/<package>/<module>.py` (a subpackage's
   module is `<package>.<sub>.<module>`). Both checks on that module alone, at the declared

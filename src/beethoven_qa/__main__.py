@@ -10,6 +10,7 @@ the cli export; tests/test_interface.py holds this parser to it.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -44,6 +45,14 @@ def _gate_parser(g: argparse.ArgumentParser) -> None:
         action="store_true",
         help="accepted and without effect: every run prints every condition's verdict and fails "
         "on a precondition no input can meet",
+    )
+    g.add_argument(
+        "--base",
+        metavar="REF",
+        default=os.environ.get("BEETHOVEN_QA_BASE") or "none",
+        help="prove only the modules the change since this commit reaches: a ref, 'auto' (where "
+        "HEAD left the remote's default branch) or 'none' (every module; the default, unless "
+        "BEETHOVEN_QA_BASE names another); never under --module, which proves its module whole",
     )
 
 
@@ -163,8 +172,10 @@ def _gate(args: argparse.Namespace) -> int:
     if args.module is not None and not args.module.startswith(config.package):
         print(f"gate: {args.module} is not part of {config.package}")
         return 2
-    # --report-all is accepted for the workflow scripts that pass it; it is the default.
-    return gate._run(args.root.resolve(), args.module)
+    # --report-all is accepted for the workflow scripts that pass it; it is the default. --module
+    # proves its module whole, whatever the base, since a person asked for that module.
+    base = "none" if args.module is not None else args.base
+    return gate._run(args.root.resolve(), args.module, base)
 
 
 def _standards(args: argparse.Namespace) -> int:

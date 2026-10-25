@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import types
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,7 @@ from beethoven_qa.gate import (
     uncontracted,
     verdicts,
 )
+from beethoven_qa.scope import ROOT_FILES
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 
@@ -896,3 +898,162 @@ def test_module_gate_is_not_a_command() -> None:
         check=False,
     )
     assert result.returncode != 0 and "python -m beethoven_qa gate" in result.stderr
+
+
+# The narrowing (--base, beethoven_qa.scope): a throwaway repository that is a real git checkout,
+# its package's modules each with one proven function, so what a run proves is what it counts.
+TRIPLE = PROVEN.replace("double", "triple").replace("2 * x", "3 * x")
+USES = """
+    from beethoven_qa.contracts import ensure, require
+    from toy.logic import double
+
+    @require(lambda x: x >= 0)
+    @ensure(lambda result, x: result >= x)
+    def quadruple(x: int) -> int:
+        return double(double(x))
+"""
+
+
+def _git_in(root: Path, *args: str) -> str:
+    # Hermetic: none of the person's configuration, a fixed author, no repository named for git.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    for who in ("AUTHOR", "COMMITTER"):
+        env.update({f"GIT_{who}_NAME": "test", f"GIT_{who}_EMAIL": "test@example.invalid"})
+    done = subprocess.run(
+        ["git", "-C", str(root), *args], capture_output=True, text=True, check=True, env=env
+    )
+    return done.stdout.strip()
+
+
+def _checkout(tmp_path: Path) -> tuple[Path, str]:
+    # The toy package as a commit: logic (double), other (triple), uses (quadruple, over double).
+    root = _toy(
+        tmp_path,
+        {"__init__.py": "", "logic.py": PROVEN, "other.py": TRIPLE, "uses.py": USES},
+    )
+    _git_in(root, "init", "-q", "-b", "main")
+    _git_in(root, "add", "-A")
+    _git_in(root, "commit", "-q", "-m", "base")
+    return root, _git_in(root, "rev-parse", "HEAD")
+
+
+def _gate_with(root: Path, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "beethoven_qa", "gate", "--root", str(root), *args],
+        cwd=root,
+        env={"PYTHONPATH": str(SRC), "PATH": "/usr/bin:/bin", **env},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+    )
+
+
+def test_a_base_proves_only_the_modules_the_change_reaches(tmp_path: Path) -> None:
+    root, base = _checkout(tmp_path)
+    logic = root / "src" / "toy" / "logic.py"
+    logic.write_text(logic.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+    ran = _gate_with(root, "--base", base)
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    assert (
+        f"gate: proof: 2 of 4 modules, those the change since {base[:12]} reaches: "
+        "toy.logic, toy.uses" in ran.stdout
+    ), ran.stdout
+    assert "over toy: 2 of 3 (those in the modules the change reaches) contracted" in ran.stdout
+    assert "gate: toy.other.triple: exit" not in ran.stdout  # not reached, not proven
+    assert "gate: toy.uses.quadruple: exit 0" in ran.stdout  # it imports what changed
+    # The same from the environment, which is how the pre-push hook asks for it.
+    assert _gate_with(root, BEETHOVEN_QA_BASE=base).stdout == ran.stdout
+
+
+def test_a_base_proves_every_module_or_none_as_the_change_says(tmp_path: Path) -> None:
+    root, base = _checkout(tmp_path)
+    nothing = _gate_with(root, "--base", base)
+    assert nothing.returncode == 0, nothing.stdout + nothing.stderr
+    assert "0 of 4 modules, those the change since" in nothing.stdout
+    assert "reaches: none" in nothing.stdout
+    assert CONDITIONS.match(nothing.stdout.splitlines()[-2]), nothing.stdout
+    (root / "docs").mkdir()
+    (root / "docs" / "notes.md").write_text("a note\n", encoding="utf-8")
+    assert "reaches: none" in _gate_with(root, "--base", base).stdout
+    # The gate's table is read by every proof, so a change to it proves every module.
+    pyproject = root / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    every = _gate_with(root, "--base", base)
+    assert every.returncode == 0, every.stdout + every.stderr
+    assert "gate: proof: every module: pyproject.toml changed since" in every.stdout
+    assert "over toy: 3 contracted functions and classes" in every.stdout
+
+
+def test_without_a_base_or_under_module_the_proof_is_whole(tmp_path: Path) -> None:
+    root, base = _checkout(tmp_path)
+    plain = _gate_with(root)
+    assert plain.returncode == 0 and "gate: proof:" not in plain.stdout, plain.stdout
+    assert "over toy: 3 contracted functions and classes" in plain.stdout
+    assert _gate_with(root, "--base", "none", BEETHOVEN_QA_BASE=base).stdout == plain.stdout
+    one = _gate_with(root, "--module", "toy.other", "--base", base)
+    assert one.returncode == 0 and "gate: proof:" not in one.stdout, one.stdout
+    assert "gate: toy.other.triple: exit 0" in one.stdout
+    # A base that cannot be told proves every module and says why.
+    unknown = _gate_with(root, "--base", "no-such-ref")
+    assert unknown.returncode == 0, unknown.stdout + unknown.stderr
+    assert "gate: proof: every module, as what changed since no-such-ref cannot be told" in (
+        unknown.stdout
+    )
+    assert "over toy: 3 contracted functions and classes" in unknown.stdout
+
+
+def test_the_narrowing_in_process(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # The same decisions as above, made in this process, where the coverage of new lines counts.
+    root, base = _checkout(tmp_path)
+    root = root.resolve()
+    config = GateConfig.from_pyproject(root)
+    assert gate._reach(root, config, "none") == (None, "")
+    other = root / "src" / "toy" / "other.py"
+    other.write_text(other.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+    modules, why = gate._reach(root, config, base)
+    assert modules == {"toy.other"} and why.startswith("1 of 4 modules"), why
+    targets = ["toy.logic.double", "toy.other.triple", "toy.uses.quadruple"]
+    assert gate._chosen(root, config, targets, base) == ["toy.other.triple"]
+    assert capsys.readouterr().out.startswith("gate: proof: 1 of 4 modules")
+    assert gate._how_many(["toy.other.triple"], targets) == (
+        "1 of 3 (those in the modules the change reaches)"
+    )
+    assert gate._how_many(targets, targets) == "3"
+    assert gate._chosen(root, config, targets, "none") == targets
+    assert capsys.readouterr().out == ""
+    unknown, why = gate._reach(root, config, "no-such-ref")
+    assert unknown is None and "cannot be told" in why
+    # A gate root inside a checkout but not its top level: git would give paths from elsewhere.
+    inner = root / "src"
+    assert gate._reach(inner, config, base)[1].endswith("is not the top level of a git repository")
+
+
+def test_every_proof_reads_the_root_files_and_the_gates_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = SRC.parent.resolve()
+    own = gate._everywhere(repo, GateConfig.from_pyproject(repo))
+    assert ROOT_FILES <= own
+    for name in ("__init__", "contracts", "gate", "scope", "_crosshair"):
+        assert f"src/beethoven_qa/{name}.py" in own, name
+    # A module of the package checked is reached through what imports it, not by every proof.
+    assert "src/beethoven_qa/vendor.py" not in own
+    # A module the process imported from beside the package counts, wherever it sits.
+    root = _toy(tmp_path, {"__init__.py": "", "logic.py": PROVEN}).resolve()
+    helper = types.ModuleType("helper_beside_the_package")
+    helper.__file__ = str(root / "tools" / "helper.py")
+    monkeypatch.setitem(sys.modules, helper.__name__, helper)
+    beside = gate._everywhere(root, GateConfig.from_pyproject(root))
+    assert "tools/helper.py" in beside
+    assert not any(path.startswith("src/toy/") for path in beside)
+
+
+def test_prove_starts_one_process_per_target(tmp_path: Path) -> None:
+    root = _toy(tmp_path, {"__init__.py": "", "logic.py": PROVEN}).resolve()
+    config = GateConfig.from_pyproject(root)
+    assert gate._prove(root, config, [], 1) == []
+    (done,) = gate._prove(root, config, ["toy.logic.double"], 1)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "info: Confirmed over all paths." in done.stdout

@@ -195,6 +195,19 @@ def test_a_clean_push_of_head_runs_the_gate_once_and_goes_through(lab: Lab) -> N
     assert lab.remote_ref("refs/heads/other") == head
 
 
+def test_the_gate_proves_what_the_change_reaches_unless_the_pusher_says(lab: Lab) -> None:
+    # The hook asks the gate to prove again only the modules the change since the branch left the
+    # remote's default branch reaches (beethoven_qa.scope); a person who sets the variable keeps it.
+    done = lab.push("HEAD:refs/heads/main")
+    assert done.returncode == 0, done.stderr
+    assert lab.gate_env()["BEETHOVEN_QA_BASE"] == "auto"
+    assert "with BEETHOVEN_QA_BASE=auto" in done.stderr
+    whole = lab.push("HEAD:refs/heads/whole", BEETHOVEN_QA_BASE="none")
+    assert whole.returncode == 0, whole.stderr
+    assert lab.gate_env()["BEETHOVEN_QA_BASE"] == "none"
+    assert lab.calls() == ["run --locked gate", "run --locked gate"]
+
+
 def test_an_annotated_tag_of_head_and_a_deletion_go_through(lab: Lab) -> None:
     # A tag's local sha is the tag object, not the commit it names; a deletion's is all zeros.
     # Neither is "a commit other than HEAD".
