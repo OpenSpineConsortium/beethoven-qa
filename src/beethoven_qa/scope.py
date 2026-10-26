@@ -8,12 +8,25 @@ environment (``pixi.toml``, ``pixi.lock``) and the gate's own code. A change tha
 those leaves the verdict as it was at the base commit, so with a base the gate proves again only
 the modules the change reaches:
 
-- a change to ``pyproject.toml``, ``pixi.toml`` or ``pixi.lock``, to the gate's own files (the
-  ``__init__``, ``contracts``, ``gate``, ``scope`` and ``_crosshair`` of the ``beethoven_qa`` the
-  gate runs from, wherever that copy sits), to any other file of the repository the gate's process
+- a change to ``pixi.toml`` or ``pixi.lock``, to the gate's own files (the ``__init__``,
+  ``contracts``, ``gate``, ``scope`` and ``_crosshair`` of the ``beethoven_qa`` the gate runs
+  from, wherever that copy sits), to any other file of the repository the gate's process
   imported from outside the package, to a file of the package's directory that is not one of its
-  modules (a stub, a data file) or to a Python file of the source directory outside the package
-  reaches every module;
+  modules (a stub, a data file, a cached ``.pyc`` git tracks) or to a Python file of the source
+  directory outside the package (a source, a stub or a compiled file) reaches every module;
+- a link or a submodule git tracks anywhere in the repository, at the base or in the index, and a
+  link on the disk among the root files or in the package's directory (the entry itself or a
+  folder on its way), prove every module whatever changed (from 10.0.0), since git names an edit
+  made through one by a path that says nothing of what a proof reads;
+- a change to ``pyproject.toml`` is read by its keys, not its bytes (from 10.0.0): a comment, a
+  blank line or a key no proof reads reaches nothing, which is an entry of
+  ``[tool.beethoven-qa.unproven]`` added or reworded (listing keeps a function from being a target
+  and nothing more), an entry of ``[tool.beethoven-qa.boundary]`` (only the boundary lane reads
+  it) and the table of a tool in ``QUIET_TOOLS`` (a lane of its own, which the CrossHair process
+  never imports); an unproven entry removed reaches the one target it named, a target again; any
+  other key reaches every module, the rest of the gate's table, ``[project]``, ``[build-system]``
+  and the table of a tool the gate does not know among them, and so does a file either side of
+  which cannot be read as TOML;
 - a change to a module reaches that module and every module that imports it, directly or through
   others, a package's ``__init__`` counting as imported by every module under it;
 - a module that imports by a name it computes (``importlib.import_module`` or ``__import__`` given
@@ -25,13 +38,21 @@ the modules the change reaches:
 Check 1 of the gate (contracts, imports, directives, suppressions, skipped tests, the unproven
 entries) is cheap and always covers the whole package; only check 2, the proof, is narrowed. When
 the base cannot be told, or git fails, every module is proven, so the narrowing can only ever prove
-more than it must, never less than the rule above. What it assumes is that the modules a change
-does not reach passed at the base: the pre-push hook's base is where the branch left the remote's
-default branch, which that branch's own required check passed, and a CI run names the newest commit
-whose gate passed on a push. It assumes too that a proof reads no file but those above: a contracted
+more than it must, never less than the rule above. What it assumes is that the modules a change does
+not reach passed at the base: the pre-push hook's base is where the branch left the remote's default
+branch, which that branch's own required check passed, and a CI run names the newest commit whose
+gate passed on a push. It assumes too that a proof reads no file but those above: a contracted
 function is pure, as the layering rule asks (the definition-of-done skill), so a data file outside
-the package's directory decides no verdict. CrossHair's search is bounded and timed, so it is not
-quite the same twice; the full run, with no base (the default), stays the backstop.
+the package's directory decides no verdict, and nothing it runs imports inside a function body: a
+module outside the package that the package imports at its top is a file the gate's process
+imported, which every proof reads, while one imported only inside a function (at the
+repository's root, say, which a CrossHair process started there finds) is a file the narrowing
+never sees. Of ``pyproject.toml`` it assumes that only the gate's
+table is read during a proof, and that by the gate, never by CrossHair, icontract, beartype or a
+pure function: a comment and a quiet tool's table then decide nothing, and a key of a table the gate
+does not know proves everything, so a reader it has not heard of costs time, never a verdict.
+CrossHair's search is bounded and timed, so it is not quite the same twice; the full run, with no
+base (the default), stays the backstop.
 
 The decisions carry contracts and are proven with the rest of the package; reading git and the
 files is private and carries none, as in the gate itself. ``_resolve`` is the standards' base too.
@@ -40,24 +61,64 @@ files is private and carries none, as in the gate itself. ``_resolve`` is the st
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
+import tomllib
+from enum import StrEnum
 from pathlib import Path
 from typing import NamedTuple
 
 from beartype import beartype
 
 from beethoven_qa.contracts import ensure
-from beethoven_qa.vendor import _git
+from beethoven_qa.vendor import _git, _git_bytes
 
-__all__ = ["ROOT_FILES", "module_named", "reached", "reaches_every_module"]
+__all__ = [
+    "QUIET_TOOLS",
+    "ROOT_FILES",
+    "TABLE_FILE",
+    "Effect",
+    "differing_keys",
+    "module_named",
+    "reached",
+    "reaches_every_module",
+    "table_reach",
+]
 
 # The files at the repository's root that every proof reads: the gate's table and its bound, and
-# the environment CrossHair, Z3 and the package's dependencies come from.
+# the environment CrossHair, Z3 and the package's dependencies come from. The table, TABLE_FILE, is
+# read by its keys (table_reach); the other two by their bytes.
 ROOT_FILES = frozenset({"pyproject.toml", "pixi.toml", "pixi.lock"})
+TABLE_FILE = "pyproject.toml"
 
-# What a Python file of the source directory may be, beside the package: a module, or a stub that
-# mypy and an import would read in its place.
-_PYTHON = (".py", ".pyi")
+# The tools whose tables in pyproject.toml no proof reads: each is a lane of its own or a checker a
+# repository runs beside the gate (lint, typecheck, test and the security group read theirs), and
+# the CrossHair process imports none of them. A tool not named here, one the gate does not know
+# among them, reaches every module, since leaving one out only proves more. coverage.py is left out
+# on purpose: its .pth file starts it in every Python process where COVERAGE_PROCESS_START is set,
+# the CrossHair processes among them, and its table can name plugins, which are code.
+QUIET_TOOLS = frozenset(
+    {
+        "bandit",
+        "black",
+        "codespell",
+        "flake8",
+        "isort",
+        "mypy",
+        "pylint",
+        "pyright",
+        "pytest",
+        "ruff",
+    }
+)
+
+_UNPROVEN = ("tool", "beethoven-qa", "unproven")
+_BOUNDARY = ("tool", "beethoven-qa", "boundary")
+
+# What a Python file of the source directory may be, beside the package: a module, a stub that
+# mypy and an import would read in its place, or a compiled file an import loads in place of its
+# source (a hash-based .pyc whatever code it holds, a sourceless one alone).
+_PYTHON = (".py", ".pyi", ".pyc")
 
 
 def _source_prefix(src: str) -> str:
@@ -155,6 +216,95 @@ def reached(
     return frozenset(found)
 
 
+@beartype
+@ensure(lambda result, base, head: base.keys() ^ head.keys() <= result, "a key of one side differs")
+@ensure(
+    lambda result, base, head: all(
+        (key in result) == (base[key] != head[key]) for key in base.keys() & head.keys()
+    ),
+    "a key of both sides differs exactly when its two values do",
+)
+@ensure(lambda result, base, head: result <= base.keys() | head.keys(), "only a key of a side")
+def differing_keys(
+    base: dict[tuple[str, ...], str], head: dict[tuple[str, ...], str]
+) -> frozenset[tuple[str, ...]]:
+    """The key paths whose value differs between ``base`` and ``head``, each a table of
+    ``pyproject.toml`` flattened to its leaves: a path one side lacks, or whose two values differ.
+    A path is a tuple of keys, so a key that holds a dot never splits.
+    """
+    return frozenset(key for key in base.keys() | head.keys() if base.get(key) != head.get(key))
+
+
+class Effect(StrEnum):
+    """What a change to one key path of ``pyproject.toml`` reaches: no target, the one target an
+    unproven entry named, or every module."""
+
+    NONE = "none"
+    TARGET = "target"
+    EVERY = "every"
+
+
+def _quiet_tool(path: tuple[str, ...]) -> bool:
+    return len(path) >= 2 and path[0] == "tool" and path[1] in QUIET_TOOLS
+
+
+@beartype
+@ensure(
+    lambda result, path: result[0] != Effect.TARGET or (len(path) == 4 and path[:3] == _UNPROVEN),
+    "only an unproven entry names a target",
+)
+@ensure(
+    lambda result, path: result[1] == (path[3] if result[0] == Effect.TARGET else ""),
+    "the target named is the one the entry named, and nothing else names one",
+)
+@ensure(
+    lambda result, path, after: (
+        not (len(path) == 4 and path[:3] == _UNPROVEN and not after) or result[0] == Effect.TARGET
+    ),
+    "an entry removed reaches the target it named",
+)
+@ensure(
+    lambda result, path: (
+        result[0] != Effect.NONE or path[:3] in (_UNPROVEN, _BOUNDARY) or _quiet_tool(path)
+    ),
+    "only the unproven and boundary entries and the quiet tools' tables reach nothing",
+)
+@ensure(
+    lambda result, path: (
+        path[:2] != ("tool", "beethoven-qa")
+        or path[2:3] in (("unproven",), ("boundary",))
+        or result[0] == Effect.EVERY
+    ),
+    "the rest of the gate's table reaches every module",
+)
+@ensure(
+    lambda result, path: (
+        not (path[:3] == _BOUNDARY or _quiet_tool(path)) or result[0] == Effect.NONE
+    ),
+    "the boundary entries and a quiet tool's table reach nothing",
+)
+@ensure(
+    lambda result, path, after: (
+        not (path[:3] == _UNPROVEN and (len(path) == 3 or (len(path) == 4 and after)))
+        or result[0] == Effect.NONE
+    ),
+    "an unproven entry added or reworded, or the table itself, reaches nothing",
+)
+def table_reach(path: tuple[str, ...], after: bool) -> tuple[Effect, str]:
+    """What a change to the key path ``path`` of ``pyproject.toml`` reaches, ``after`` saying
+    whether the head still holds the path: an unproven entry added or reworded reaches nothing,
+    one removed the target it named; the boundary entries and a quiet tool's table nothing;
+    anything else, the rest of the gate's table among it, every module.
+    """
+    if path[:3] == _BOUNDARY or _quiet_tool(path):
+        return Effect.NONE, ""
+    if path[:3] == _UNPROVEN and len(path) <= 4:
+        if len(path) == 4 and not after:
+            return Effect.TARGET, path[3]
+        return Effect.NONE, ""
+    return Effect.EVERY, ""
+
+
 def _commit(root: Path, ref: str) -> str:
     return _git(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").strip()
 
@@ -185,12 +335,98 @@ def _resolve(root: Path, base: str) -> str | None:
 def _changed(root: Path, base: str) -> tuple[str, ...]:
     # Every file the working tree holds otherwise than the base commit, a renamed one under both of
     # its names (a module renamed is one gone and one new), and every file git does not track yet,
-    # but what Python caches under __pycache__, which it reads only for a source that matches it,
-    # and which the gate's own import of the package writes before the change is read.
+    # but an untracked one under __pycache__, which the gate's own import of the package writes
+    # before the change is read. A tracked one counts: a hash-based .pyc is loaded in place of its
+    # source whatever code it holds, so git's copy of one is what a proof may run.
     diff = _git(root, "diff", "--no-renames", "--no-ext-diff", "--name-only", "-z", base)
     untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
-    paths = {path for path in (diff + untracked).split("\x00") if path}
-    return tuple(sorted(path for path in paths if "__pycache__" not in path.split("/")))
+    tracked = {path for path in diff.split("\x00") if path}
+    fresh = {path for path in untracked.split("\x00") if path}
+    return tuple(sorted(tracked | {p for p in fresh if "__pycache__" not in p.split("/")}))
+
+
+# The modes git gives a link and a submodule, whose entries say nothing of the files a proof reads
+# through them.
+_LINK_MODES = {"120000": "a link", "160000": "a submodule"}
+
+
+def _tracked_link(root: Path, commit: str) -> str | None:
+    # Why every module is proven when git tracks a link or a submodule anywhere, at the base or in
+    # the index, else None: git names an edit made through a link by the link's target, and one
+    # inside a submodule by the submodule alone, so where such a path sits says nothing of whether
+    # a proof reads it. A link nobody tracks is a change git lists under its own name.
+    base = _git(root, "ls-tree", "-r", "-z", commit)
+    index = _git(root, "ls-files", "--stage", "-z")
+    for entry in (base + index).split("\x00"):
+        mode, _, rest = entry.partition(" ")
+        if mode in _LINK_MODES:
+            what, path = _LINK_MODES[mode], rest.partition("\t")[2]
+            return (
+                f"{path} is {what} git tracks, so the path git names for an edit made through "
+                "it says nothing of what a proof reads"
+            )
+    return None
+
+
+def _leaves(document: dict[str, object]) -> dict[tuple[str, ...], str]:
+    # Every key path of a parsed TOML document down to a value that is not a table, or to an empty
+    # table, with the value as text: an array is one value, compared whole. Walked with a stack, not
+    # by recursion, since a dotted key may nest tables deeper than Python recurses.
+    found: dict[tuple[str, ...], str] = {}
+    stack: list[tuple[tuple[str, ...], object]] = [((), document)]
+    while stack:
+        prefix, value = stack.pop()
+        if isinstance(value, dict) and value:
+            stack.extend(((*prefix, str(key)), inner) for key, inner in value.items())
+        else:
+            found[prefix] = repr(value)
+    return found
+
+
+def _spelled(path: tuple[str, ...]) -> str:
+    # A key path as TOML writes it, a key that is not a bare one in quotes.
+    bare = re.compile(r"[A-Za-z0-9_-]+")
+    return ".".join(part if bare.fullmatch(part) else f'"{part}"' for part in path)
+
+
+def _tables(
+    root: Path, commit: str
+) -> tuple[dict[tuple[str, ...], str], dict[tuple[str, ...], str]]:
+    # The table file's key paths at the base and at the head; ValueError naming the side that
+    # cannot be read (absent, not UTF-8, not TOML). git's own error repeats its whole command, the
+    # checkout's path among it, so it is not passed on.
+    at = f"{TABLE_FILE} cannot be read at {commit[:12]}"
+    try:
+        before = _git_bytes(root, "show", f"{commit}:{TABLE_FILE}").decode("utf-8")
+    except subprocess.CalledProcessError:
+        raise ValueError(f"{at}: git cannot show it there") from None
+    except ValueError as exc:
+        raise ValueError(f"{at}: {exc}") from None
+    try:
+        base = _leaves(tomllib.loads(before))
+        head = _leaves(tomllib.loads((root / TABLE_FILE).read_text(encoding="utf-8")))
+    except (OSError, ValueError, RecursionError) as exc:
+        # RecursionError: tomllib parses an array or an inline table by recursion, and gives up
+        # on one nested past Python's limit.
+        raise ValueError(f"{TABLE_FILE} cannot be read as TOML at a side: {exc}") from None
+    return base, head
+
+
+def _table_change(root: Path, commit: str) -> tuple[str, frozenset[str]]:
+    # What the change since ``commit`` to the table file reaches (table_reach): why it reaches
+    # every module, empty when it does not, and the targets its removed unproven entries named.
+    try:
+        base, head = _tables(root, commit)
+    except ValueError as exc:
+        return str(exc), frozenset()
+    named: set[str] = set()
+    for path in sorted(differing_keys(base, head)):
+        effect, target = table_reach(path, path in head)
+        if effect == Effect.EVERY:
+            return f"{TABLE_FILE}'s {_spelled(path)} changed since {commit[:12]}", frozenset()
+        if effect == Effect.TARGET:
+            named.add(target)
+    return "", frozenset(named)
 
 
 class _Graph(NamedTuple):

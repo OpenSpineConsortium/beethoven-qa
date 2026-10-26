@@ -117,8 +117,12 @@ per_condition_timeout = 20          # seconds per condition, 1 to 600: the decla
   the contract rule and CrossHair at the declared bound. Both always run, and it fails on either.
   With a base (`--base <ref>`, or `BEETHOVEN_QA_BASE`, which the pre-push hook sets to `auto`),
   CrossHair proves only the modules the change since that commit reaches, their importers among
-  them, and every module where the change touches what every proof reads; the contract rule still
-  covers the whole package.
+  them, and every module where the change touches what every proof reads; `pyproject.toml` is read
+  by its keys, so a comment, an unproven entry added or reworded, a boundary entry or the table of
+  a tool in `scope.QUIET_TOOLS` (bandit, black, codespell, flake8, isort, mypy, pylint, pyright,
+  pytest, ruff) proves nothing and an unproven entry removed proves the function it named, while
+  any other key proves every module, as does a link or a submodule git tracks; the contract rule
+  still covers the whole package.
 - One module, every condition's verdict: `pixi run --locked python -m beethoven_qa gate --module
   <package>.<module> --report-all`, the dotted name of `src/<package>/<module>.py` (a subpackage's
   module is `<package>.<sub>.<module>`). Both checks on that module alone, at the declared
