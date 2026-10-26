@@ -194,12 +194,26 @@ that states the function's real domain, which no caller ever leaves, is not dodg
   check 2 alone to the modules the change since that commit reaches, and prints which (`gate:
   proof: ...`): `beethoven_qa.scope` reads `git diff` and the package's imports, a module reaching
   itself and every module that imports it however indirectly, a package's `__init__` everything
-  under it, a module that imports by a computed name every change, and `pyproject.toml`,
-  `pixi.toml`, `pixi.lock`, the gate's own files (`__init__`, `contracts`, `gate`, `scope`,
-  `_crosshair`, wherever the copy runs from), any other repository file the gate's process
+  under it, a module that imports by a computed name every change, and `pixi.toml`,
+  `pixi.lock`, the gate's own files (`__init__`, `contracts`, `gate`, `scope`, `_crosshair`,
+  wherever the copy runs from), any other repository file the gate's process
   imported from outside the package, a non-module file of the package's directory and a Python
   file beside the package every module; anything else, a document, data, a test, a workflow,
-  reaches none. Check 1 always covers the whole package, a base that cannot be told proves every
+  reaches none. From 10.0.0 `pyproject.toml` is read by its keys, not its bytes: a comment, an entry
+  of `[tool.beethoven-qa.unproven]` added or reworded, an entry of `[tool.beethoven-qa.boundary]`
+  and the table of a quiet tool (`scope.QUIET_TOOLS`: bandit, black, codespell, flake8, isort, mypy,
+  pylint, pyright, pytest, ruff, lanes and checkers the CrossHair process never reads; coverage.py
+  is left out, since its `.pth` file starts it in any process where `COVERAGE_PROCESS_START` is set)
+  reach no module; an unproven entry removed proves the one function it set aside; any other key,
+  the rest of the gate's table, `[project]` and a tool the gate does not know among them, proves
+  every module and the line names the key (greg asked on 2026-10-26 why SchwingNet #401's gate took
+  45 minutes: one unproven line had made it re-prove all 153 targets). A link or a submodule git
+  tracks anywhere, and a link on the disk among the root files or in the package's directory, prove
+  every module whatever changed, since git names an edit made through one by a path that says
+  nothing of what a proof reads; a cached `.pyc` git tracks in the package's directory, and a
+  compiled file beside the package, count as changes; a module outside the package imported only
+  inside a function body is outside what the narrowing sees, which the layering rule allows nothing
+  proven to do. Check 1 always covers the whole package, a base that cannot be told proves every
   module, and `--module` ignores the base. The pre-push hook passes `auto`; CI passes, on a pull
   request, the newest commit of `main` whose run passed on a push, and on `main` none.
   Every run prints every condition's verdict, counts them under each target (`gate: <target>: <c>

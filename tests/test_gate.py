@@ -960,7 +960,7 @@ def test_a_base_proves_only_the_modules_the_change_reaches(tmp_path: Path) -> No
         f"gate: proof: 2 of 4 modules, those the change since {base[:12]} reaches: "
         "toy.logic, toy.uses" in ran.stdout
     ), ran.stdout
-    assert "over toy: 2 of 3 (those in the modules the change reaches) contracted" in ran.stdout
+    assert "over toy: 2 of 3 (those the change reaches) contracted" in ran.stdout
     assert "gate: toy.other.triple: exit" not in ran.stdout  # not reached, not proven
     assert "gate: toy.uses.quadruple: exit 0" in ran.stdout  # it imports what changed
     # The same from the environment, which is how the pre-push hook asks for it.
@@ -977,13 +977,53 @@ def test_a_base_proves_every_module_or_none_as_the_change_says(tmp_path: Path) -
     (root / "docs").mkdir()
     (root / "docs" / "notes.md").write_text("a note\n", encoding="utf-8")
     assert "reaches: none" in _gate_with(root, "--base", base).stdout
-    # The gate's table is read by every proof, so a change to it proves every module.
+    # The gate's table is read by its keys: a comment, or a table no proof reads, proves nothing.
     pyproject = root / "pyproject.toml"
-    pyproject.write_text(pyproject.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    table = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(table + "# changed\n[tool.ruff]\nline-length = 99\n", encoding="utf-8")
+    quiet = _gate_with(root, "--base", base)
+    assert quiet.returncode == 0, quiet.stdout + quiet.stderr
+    assert "0 of 4 modules, those the change since" in quiet.stdout, quiet.stdout
+    # A key of the gate's own table is read by every proof, so it proves every module, by name.
+    pyproject.write_text(table.replace("per_condition_timeout = 3", "per_condition_timeout = 4"))
     every = _gate_with(root, "--base", base)
     assert every.returncode == 0, every.stdout + every.stderr
-    assert "gate: proof: every module: pyproject.toml changed since" in every.stdout
+    assert (
+        "gate: proof: every module: pyproject.toml's tool.beethoven-qa.per_condition_timeout "
+        f"changed since {base[:12]}, and every proof reads it" in every.stdout
+    ), every.stdout
     assert "over toy: 3 contracted functions and classes" in every.stdout
+
+
+def test_a_base_proves_the_target_an_unproven_entry_removed_names(tmp_path: Path) -> None:
+    # Listing a function keeps it from being a target and nothing more, so an entry added proves
+    # nothing and one removed proves the one function it set aside, wherever its module is.
+    entry = '[tool.beethoven-qa.unproven]\n"toy.other.triple" = "measured slow"\n'
+    root = _toy(
+        tmp_path,
+        {"__init__.py": "", "logic.py": PROVEN, "other.py": TRIPLE, "uses.py": USES},
+        extra=entry,
+    )
+    _git_in(root, "init", "-q", "-b", "main")
+    _git_in(root, "add", "-A")
+    _git_in(root, "commit", "-q", "-m", "base")
+    base = _git_in(root, "rev-parse", "HEAD")
+    pyproject = root / "pyproject.toml"
+    listed = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(listed + '"toy.logic.double" = "a second entry"\n', encoding="utf-8")
+    added = _gate_with(root, "--base", base)
+    assert added.returncode == 0, added.stdout + added.stderr
+    assert "0 of 4 modules, those the change since" in added.stdout, added.stdout
+    pyproject.write_text(listed.replace(entry, ""), encoding="utf-8")
+    removed = _gate_with(root, "--base", base)
+    assert removed.returncode == 0, removed.stdout + removed.stderr
+    assert (
+        f"gate: proof: 0 of 4 modules, those the change since {base[:12]} reaches: none; and "
+        "toy.other.triple, which the unproven entries it removed named" in removed.stdout
+    ), removed.stdout
+    assert "over toy: 1 of 3 (those the change reaches) contracted" in removed.stdout
+    assert "gate: toy.other.triple: exit 0" in removed.stdout
+    assert "gate: toy.logic.double: exit" not in removed.stdout
 
 
 def test_without_a_base_or_under_module_the_proof_is_whole(tmp_path: Path) -> None:
@@ -1009,25 +1049,115 @@ def test_the_narrowing_in_process(tmp_path: Path, capsys: pytest.CaptureFixture[
     root, base = _checkout(tmp_path)
     root = root.resolve()
     config = GateConfig.from_pyproject(root)
-    assert gate._reach(root, config, "none") == (None, "")
+    assert gate._reach(root, config, "none") == (None, frozenset(), "")
     other = root / "src" / "toy" / "other.py"
     other.write_text(other.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
-    modules, why = gate._reach(root, config, base)
-    assert modules == {"toy.other"} and why.startswith("1 of 4 modules"), why
+    modules, named, why = gate._reach(root, config, base)
+    assert modules == {"toy.other"} and not named and why.startswith("1 of 4 modules"), why
     targets = ["toy.logic.double", "toy.other.triple", "toy.uses.quadruple"]
     assert gate._chosen(root, config, targets, base) == ["toy.other.triple"]
     assert capsys.readouterr().out.startswith("gate: proof: 1 of 4 modules")
-    assert gate._how_many(["toy.other.triple"], targets) == (
-        "1 of 3 (those in the modules the change reaches)"
-    )
+    assert gate._how_many(["toy.other.triple"], targets) == "1 of 3 (those the change reaches)"
     assert gate._how_many(targets, targets) == "3"
     assert gate._chosen(root, config, targets, "none") == targets
     assert capsys.readouterr().out == ""
-    unknown, why = gate._reach(root, config, "no-such-ref")
+    unknown, _, why = gate._reach(root, config, "no-such-ref")
     assert unknown is None and "cannot be told" in why
     # A gate root inside a checkout but not its top level: git would give paths from elsewhere.
     inner = root / "src"
-    assert gate._reach(inner, config, base)[1].endswith("is not the top level of a git repository")
+    assert gate._reach(inner, config, base).why.endswith("is not the top level of a git repository")
+    # The table file read by its keys, in this process: a quiet change, then one that cannot be
+    # read as TOML, which proves every module and says why, never failing the gate.
+    pyproject = root / "pyproject.toml"
+    table = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(table + "[tool.mypy]\nstrict = true\n", encoding="utf-8")
+    assert gate._reach(root, config, base).modules == {"toy.other"}
+    pyproject.write_text(table + "[tool.mypy\n", encoding="utf-8")
+    broken = gate._reach(root, config, base)
+    assert broken.modules is None, broken
+    assert broken.why.startswith("every module: pyproject.toml cannot be read as TOML"), broken.why
+    # A file every proof reads by its bytes, pixi.toml here, proves every module and is named.
+    pyproject.write_text(table, encoding="utf-8")
+    (root / "pixi.toml").write_text("[workspace]\n", encoding="utf-8")
+    pixi = gate._reach(root, config, base)
+    assert pixi.modules is None, pixi
+    assert pixi.why == (
+        f"every module: pixi.toml changed since {base[:12]}, and every proof reads it"
+    ), pixi.why
+    # A quiet table changed beside it cannot take that back.
+    pyproject.write_text(table + "[tool.mypy]\nstrict = true\n", encoding="utf-8")
+    assert gate._reach(root, config, base) == pixi
+
+
+def test_a_link_among_what_the_rules_read_proves_every_module(tmp_path: Path) -> None:
+    # git names an edit made through a link by the link's target, a path no rule counts, so a link
+    # among the files every proof reads, or in the package's directory, proves every module.
+    root, _ = _checkout(tmp_path)
+    root = root.resolve()
+    (root / "conf").mkdir()
+    (root / "pyproject.toml").rename(root / "conf" / "pyproject.toml")
+    (root / "pyproject.toml").symlink_to("conf/pyproject.toml")
+    base = _commit_all(root, "the table through a link")
+    config = GateConfig.from_pyproject(root)
+    conf = root / "conf" / "pyproject.toml"
+    conf.write_text(conf.read_text(encoding="utf-8").replace("= 3", "= 1"), encoding="utf-8")
+    table = gate._reach(root, config, base)
+    assert table.modules is None, table
+    assert table.why == (
+        "every module: pyproject.toml is reached through a link, so git names an edit to it by "
+        "another path"
+    )
+    # Untracked, a link in the package's directory is found on the disk.
+    (root / "pyproject.toml").unlink()
+    conf.rename(root / "pyproject.toml")
+    base = _commit_all(root, "the table in place")
+    (root / "src" / "toy" / "alias.py").symlink_to("other.py")
+    alias = gate._reach(root, config, base)
+    assert alias.why == (
+        "every module: src/toy/alias.py is reached through a link, so git names an edit to it by "
+        "another path"
+    ), alias
+    # A folder on the way counts as the link itself does.
+    (root / "src" / "toy" / "alias.py").unlink()
+    (root / "src").rename(root / "real")
+    (root / "src").symlink_to("real")
+    folder = gate._reach(root, config, base)
+    assert folder.why == (
+        "every module: src/toy is reached through a link, so git names an edit to it by another "
+        "path"
+    ), folder
+
+
+def test_a_link_or_a_submodule_git_tracks_proves_every_module(tmp_path: Path) -> None:
+    # Anywhere in the repository, since the path git names for an edit made through either says
+    # nothing of whether a proof reads it.
+    root, _ = _checkout(tmp_path)
+    root = root.resolve()
+    (root / "docs").mkdir()
+    (root / "docs" / "logic.py").symlink_to("../src/toy/logic.py")
+    base = _commit_all(root, "a link elsewhere")
+    config = GateConfig.from_pyproject(root)
+    link = gate._reach(root, config, base)
+    assert link.modules is None, link
+    assert link.why == (
+        "every module: docs/logic.py is a link git tracks, so the path git names for an edit made "
+        "through it says nothing of what a proof reads"
+    )
+    # A link the base holds counts though the index has dropped it.
+    _git_in(root, "rm", "-q", "docs/logic.py")
+    assert gate._reach(root, config, base) == link
+    base = _commit_all(root, "no link")
+    assert gate._reach(root, config, base).modules == frozenset()
+    sha = _git_in(root, "rev-parse", "HEAD")
+    _git_in(root, "update-index", "--add", "--cacheinfo", f"160000,{sha},vendor/qa")
+    submodule = gate._reach(root, config, base)
+    assert submodule.why.startswith("every module: vendor/qa is a submodule git tracks"), submodule
+
+
+def _commit_all(root: Path, message: str) -> str:
+    _git_in(root, "add", "-A")
+    _git_in(root, "commit", "-q", "-m", message)
+    return _git_in(root, "rev-parse", "HEAD")
 
 
 def test_every_proof_reads_the_root_files_and_the_gates_own(
@@ -1044,9 +1174,11 @@ def test_every_proof_reads_the_root_files_and_the_gates_own(
     root = _toy(tmp_path, {"__init__.py": "", "logic.py": PROVEN}).resolve()
     helper = types.ModuleType("helper_beside_the_package")
     helper.__file__ = str(root / "tools" / "helper.py")
+    helper.__cached__ = str(root / "tools" / "__pycache__" / "helper.cpython-311.pyc")
     monkeypatch.setitem(sys.modules, helper.__name__, helper)
     beside = gate._everywhere(root, GateConfig.from_pyproject(root))
     assert "tools/helper.py" in beside
+    assert "tools/__pycache__/helper.cpython-311.pyc" in beside  # loaded in the source's place
     assert not any(path.startswith("src/toy/") for path in beside)
 
 

@@ -514,7 +514,11 @@ document, data or a test proves nothing again, and one that changes a module pro
 and what imports it. It needs the job to read the workflow's runs and the history, the job's
 `permissions` and the checkout's `fetch-depth: 0` above. Add `schedule:` (a daily cron) to `on:`
 for a full proof with no base, since CrossHair's search is bounded and timed and so not quite the
-same twice. Without the step the lane proves every module, as before 9.0.0.
+same twice. Without the step the lane proves every module, as before 9.0.0. From 10.0.0 a change
+to `pyproject.toml` is read by its keys: a comment, an unproven entry added or reworded, a boundary
+entry or the table of a tool in `scope.QUIET_TOOLS` (bandit, black, codespell, flake8, isort,
+mypy, pylint, pyright, pytest, ruff) proves nothing, an unproven entry removed proves the function
+it set aside, and any other key every module.
 
 The code standards run in the kit's `.github/workflows/standards.yml`, not in this file: one job,
 `standards (every group green)`, with a step per group, green only when every group's step is. The
@@ -872,6 +876,27 @@ dialog, which a cloud session never shows; no thread has tried it.
    a push, which needs `actions: read` and the history (`fetch-depth: 0`); a full run on a
    schedule, with no base, stays the backstop. The `cli` export gains an option and a variable
    and keeps its version.
+   **From 9.0.0 to 10.0.0**: with a base, `pyproject.toml` is read by its keys, not its bytes
+   (`src/beethoven_qa/scope.py`, `table_reach`). A comment or blank line, an entry of
+   `[tool.beethoven-qa.unproven]` added or reworded (listing keeps a function from being a target
+   and nothing more), an entry of `[tool.beethoven-qa.boundary]` and the table of a tool in
+   `scope.QUIET_TOOLS` (ruff, mypy, pytest, bandit, black, isort, flake8, pylint, pyright,
+   codespell: lanes and checkers the CrossHair process never imports; coverage.py is not among them,
+   since it can start inside that process) prove no module; an unproven entry removed proves the one
+   function it set aside, wherever its module; any other key proves every module, and the line names
+   it (`gate: proof: every module: pyproject.toml's tool.beethoven-qa.per_condition_timeout changed
+   since ...`). A link or a submodule git tracks anywhere in the repository, and a link on the disk
+   among the root files or in the package's directory, now prove every module whatever changed,
+   since git names an edit made through one by a path that says nothing of what a proof reads; a
+   repository that tracks a link gets no narrowing until it takes the link out. A cached `.pyc` git
+   tracks in the package's directory, and a compiled file beside the package, now count as changes,
+   as an import may load one in place of its source. A module outside the package that the package
+   imports only inside a function body is outside what the narrowing sees, as it was before; the
+   layering rule keeps imports out of what a proof runs, and the full run with no base is the
+   backstop. Measured on SchwingNet's pull requests that each added one unproven entry: #401 from
+   306 conditions to 120, #406 from 217 to 20, #253 from 197 to 54. The count on the CrossHair line
+   reads `<k> of <n> (those the change reaches)`. No kit file changes: take it with `--ref v10.0.0`;
+   the `cli` export keeps its version.
 4. One commit for the copy, its ORIGIN, the kit files and any lock change, its message naming the
    old and the new release; then a pull request, ready for review, which merges when the gate is
    green. A red gate after an update is reported red and fixed at its cause, in the consumer's code

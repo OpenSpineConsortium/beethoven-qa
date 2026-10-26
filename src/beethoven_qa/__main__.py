@@ -50,9 +50,10 @@ def _gate_parser(g: argparse.ArgumentParser) -> None:
         "--base",
         metavar="REF",
         default=os.environ.get("BEETHOVEN_QA_BASE") or "none",
-        help="prove only the modules the change since this commit reaches: a ref, 'auto' (where "
-        "HEAD left the remote's default branch) or 'none' (every module; the default, unless "
-        "BEETHOVEN_QA_BASE names another); never under --module, which proves its module whole",
+        help="prove only the modules the change since REF reaches (pyproject.toml read by its "
+        "keys); REF is a ref, 'auto' (where HEAD left the remote's default branch) or 'none' "
+        "(every module; the default, unless BEETHOVEN_QA_BASE names another); never under "
+        "--module, which proves its module whole",
     )
 
 

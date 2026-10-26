@@ -83,6 +83,8 @@ def test_what_every_proof_reads_reaches_every_module() -> None:
         "src/pkg/data.json",  # a file of the package's directory that no reading says is unread
         "src/pkg/py.typed",
         "src/other/x.py",  # a Python file beside the package, which it may import
+        "src/helper.pyc",  # a compiled one, which an import loads with no source beside it
+        "src/__pycache__/helper.cpython-311.pyc",  # one loaded in its source's place
     ):
         assert reaches_every_module(wide, "src", "pkg", everywhere), wide
     for narrow in (
@@ -220,3 +222,153 @@ def test_what_python_caches_is_no_change(tmp_path: Path) -> None:
     _write(tmp_path, {"src/pkg/__pycache__/a.cpython-311.pyc": "", "src/pkg/a.pyc": ""})
     # A compiled file beside the sources is importable without them, so it stays a change.
     assert scope._changed(tmp_path, base) == ("src/pkg/a.pyc",)
+    # One git tracks under __pycache__ is what a proof may run, as a hash-based .pyc is loaded
+    # whatever code it holds.
+    _git(tmp_path, "add", "-f", "src/pkg/__pycache__/a.cpython-311.pyc")
+    _git(tmp_path, "commit", "-q", "-m", "a cache tracked")
+    cached = _git(tmp_path, "rev-parse", "HEAD").strip()
+    _write(tmp_path, {"src/pkg/__pycache__/a.cpython-311.pyc": "other code"})
+    assert "src/pkg/__pycache__/a.cpython-311.pyc" in scope._changed(tmp_path, cached)
+
+
+# The table file, pyproject.toml, read by its keys (from 10.0.0): table_reach judges one key path,
+# _table_change reads both sides from git and the working tree.
+UNPROVEN = ("tool", "beethoven-qa", "unproven")
+
+
+def test_the_keys_that_differ_are_those_one_side_lacks_or_whose_values_differ() -> None:
+    base = {("a",): "1", ("b", "c"): "2", ("d",): "3"}
+    head = {("a",): "1", ("b", "c"): "9", ("e",): "4"}
+    assert scope.differing_keys(base, head) == {("b", "c"), ("d",), ("e",)}
+    assert scope.differing_keys(base, base) == frozenset()
+    # A key holding a dot is one key, never two.
+    assert scope.differing_keys({("x.y",): "1"}, {("x", "y"): "1"}) == {("x.y",), ("x", "y")}
+
+
+def test_what_a_key_of_the_table_reaches() -> None:
+    reach = scope.table_reach
+    none, every = (scope.Effect.NONE, ""), (scope.Effect.EVERY, "")
+    # Listing keeps a function from being a target and nothing more.
+    assert reach((*UNPROVEN, "pkg.a.f"), True) == none  # added, or its reason reworded
+    assert reach((*UNPROVEN, "pkg.a.f"), False) == (scope.Effect.TARGET, "pkg.a.f")  # removed
+    assert reach(UNPROVEN, True) == reach(UNPROVEN, False) == none  # the table, empty or not
+    assert reach(("tool", "beethoven-qa", "boundary", "x"), True) == none
+    for tool in scope.QUIET_TOOLS:
+        assert reach(("tool", tool, "any", "key"), True) == none
+    # Everything else every proof may read: the gate's own keys, the project, the build, a tool
+    # the gate does not know, and a deeper key under the unproven table (no entry is a table).
+    for path in (
+        ("tool", "beethoven-qa", "per_condition_timeout"),
+        ("tool", "beethoven-qa", "package"),
+        ("tool", "beethoven-qa", "exempt"),
+        ("project", "version"),
+        ("project", "dependencies"),
+        ("build-system", "requires"),
+        ("tool", "pixi", "dependencies", "x"),
+        ("tool", "crosshair", "x"),
+        ("tool", "coverage", "run", "plugins"),  # coverage.py may start in a CrossHair process
+        ("tool",),
+        (*UNPROVEN, "pkg.a.f", "deeper"),
+    ):
+        assert reach(path, True) == reach(path, False) == every, path
+
+
+def _table_repo(tmp_path: Path, table: str) -> str:
+    _write(tmp_path, {"pyproject.toml": table})
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    return _git(tmp_path, "rev-parse", "HEAD").strip()
+
+
+TABLE = """\
+[project]
+name = "pkg"  # a comment
+version = "1.0.0"
+
+[tool.beethoven-qa]
+package = "pkg"
+per_condition_timeout = 20
+
+[tool.beethoven-qa.unproven]
+"pkg.io.read" = "reads a file"
+"pkg.io.write" = "writes a file"
+
+[tool.ruff]
+line-length = 100
+"""
+
+
+def test_the_table_change_is_read_by_its_keys(tmp_path: Path) -> None:
+    base = _table_repo(tmp_path, TABLE)
+    change = scope._table_change
+    assert change(tmp_path, base) == ("", frozenset())
+    edits = {
+        "comments and blank lines": TABLE.replace("# a comment", "# another") + "\n\n# end\n",
+        "an entry added": TABLE.replace(
+            '"pkg.io.write"', '"pkg.io.sleep" = "waits"\n"pkg.io.write"'
+        ),
+        "a reason reworded": TABLE.replace("reads a file", "reads one file"),
+        "a quiet tool": TABLE.replace("line-length = 100", "line-length = 99"),
+        "the keys reordered": TABLE.replace(
+            '"pkg.io.read" = "reads a file"\n"pkg.io.write" = "writes a file"',
+            '"pkg.io.write" = "writes a file"\n"pkg.io.read" = "reads a file"',
+        ),
+    }
+    for what, text in edits.items():
+        _write(tmp_path, {"pyproject.toml": text})
+        assert change(tmp_path, base) == ("", frozenset()), what
+    _write(tmp_path, {"pyproject.toml": TABLE.replace('"pkg.io.write" = "writes a file"\n', "")})
+    assert change(tmp_path, base) == ("", {"pkg.io.write"})
+    _write(tmp_path, {"pyproject.toml": TABLE.replace("= 20", "= 30").replace("line-length", "x")})
+    why, named = change(tmp_path, base)
+    assert (
+        why == f"pyproject.toml's tool.beethoven-qa.per_condition_timeout changed since {base[:12]}"
+    )
+    assert named == frozenset()
+    _write(tmp_path, {"pyproject.toml": TABLE.replace('version = "1.0.0"', 'version = "2.0.0"')})
+    assert change(tmp_path, base)[0].startswith("pyproject.toml's project.version changed")
+    # A key that is not a bare one is spelled in quotes, as TOML writes it.
+    _write(tmp_path, {"pyproject.toml": TABLE + '\n[tool."my tool"]\nx = 1\n'})
+    assert change(tmp_path, base)[0].startswith("""pyproject.toml's tool."my tool".x changed""")
+    # A dotted key nests tables as deep as its parts, up to tomllib's limit of 1000, deeper than
+    # Python recurses: it is read like any other.
+    deep = ".".join(["k"] * 988)
+    _write(tmp_path, {"pyproject.toml": f"{TABLE}\n[tool.ruff.{deep}]\nx = 1\n"})
+    assert change(tmp_path, base) == ("", frozenset())
+    _write(tmp_path, {"pyproject.toml": f"{TABLE}\n[tool.crosshair.{deep}]\nx = 1\n"})
+    assert change(tmp_path, base)[0].startswith("pyproject.toml's tool.crosshair.k.k.k")
+
+
+def test_a_table_that_cannot_be_read_reaches_every_module(tmp_path: Path) -> None:
+    base = _table_repo(tmp_path, TABLE)
+    _write(tmp_path, {"pyproject.toml": TABLE + "[tool.ruff\n"})
+    why, named = scope._table_change(tmp_path, base)
+    assert why.startswith("pyproject.toml cannot be read as TOML at a side: ") and not named
+    (tmp_path / "pyproject.toml").write_bytes(b"\xff\xfe")
+    assert scope._table_change(tmp_path, base)[0].startswith("pyproject.toml cannot be read")
+    (tmp_path / "pyproject.toml").unlink()
+    assert scope._table_change(tmp_path, base)[0].startswith("pyproject.toml cannot be read")
+    # Absent at the base: git cannot show it, and its own error, which repeats the checkout's
+    # path, is not passed on.
+    _write(tmp_path, {"pyproject.toml": TABLE})
+    _git(tmp_path, "rm", "-q", "--cached", "pyproject.toml")
+    _git(tmp_path, "commit", "-q", "-m", "no table")
+    gone = _git(tmp_path, "rev-parse", "HEAD").strip()
+    why, _ = scope._table_change(tmp_path, gone)
+    assert why == f"pyproject.toml cannot be read at {gone[:12]}: git cannot show it there"
+    assert str(tmp_path) not in why
+    # An array nested deeper than tomllib's parser recurses, at the base: no reading, no crash.
+    nested = _table_repo(tmp_path / "nested", f"{TABLE}x = {'[' * 1500}{']' * 1500}\n")
+    _write(tmp_path / "nested", {"pyproject.toml": TABLE})
+    why, _ = scope._table_change(tmp_path / "nested", nested)
+    assert why.startswith("pyproject.toml cannot be read as TOML at a side: "), why
+    # Not UTF-8 at the base.
+    (tmp_path / "pyproject.toml").write_bytes(b"x = '\xff'\n")
+    _git(tmp_path, "add", "pyproject.toml")
+    _git(tmp_path, "commit", "-q", "-m", "latin")
+    latin = _git(tmp_path, "rev-parse", "HEAD").strip()
+    _write(tmp_path, {"pyproject.toml": TABLE})
+    assert scope._table_change(tmp_path, latin)[0].startswith(
+        f"pyproject.toml cannot be read at {latin[:12]}: "
+    )

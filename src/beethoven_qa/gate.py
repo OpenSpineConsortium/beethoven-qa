@@ -79,9 +79,12 @@ from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator,
 from beethoven_qa.contracts import ensure, require
 from beethoven_qa.scope import (
     ROOT_FILES,
+    TABLE_FILE,
     _changed,
     _graph,
     _resolve,
+    _table_change,
+    _tracked_link,
     module_named,
     reached,
     reaches_every_module,
@@ -857,7 +860,7 @@ def _how_many(chosen: list[str], targets: list[str]) -> str:
     # How many targets are proven, out of how many when the change since a base chose fewer.
     if len(chosen) == len(targets):
         return str(len(targets))
-    return f"{len(chosen)} of {len(targets)} (those in the modules the change reaches)"
+    return f"{len(chosen)} of {len(targets)} (those the change reaches)"
 
 
 # The gate's own files, beside this module wherever the copy the gate runs from sits: the package's
@@ -866,8 +869,10 @@ _OWN_FILES = ("__init__.py", "contracts.py", "gate.py", "scope.py", "_crosshair.
 
 
 def _imported_files() -> set[Path]:
-    # The file of every module this process has imported, where the import found it.
-    files = (getattr(module, "__file__", None) for module in list(sys.modules.values()))
+    # The file of every module this process has imported, where the import found it, and the
+    # compiled copy Python keeps of it, which an import may load in place of the source.
+    modules = list(sys.modules.values())
+    files = (getattr(m, name, None) for m in modules for name in ("__file__", "__cached__"))
     return {Path(file).resolve() for file in files if isinstance(file, str)}
 
 
@@ -897,41 +902,97 @@ def _changes(root: Path, base: str) -> tuple[str, tuple[str, ...]]:
     return commit, _changed(root, commit)
 
 
-def _reach(root: Path, config: GateConfig, base: str) -> tuple[frozenset[str] | None, str]:
-    # The modules check 2 proves, None for every one, and the line that says why; with no base,
-    # every module and nothing to say, as the gate ran before it took one (beethoven_qa.scope).
-    if base == "none":
-        return None, ""
-    try:
-        commit, changed = _changes(root, base)
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
-        return None, f"every module, as what changed since {base} cannot be told: {exc}"
-    since = f"since {commit[:12]}"
+class _Reach(NamedTuple):
+    # What check 2 proves with a base: the modules (None for every one), the targets beyond them
+    # that the unproven entries a change removed name, and the line that says why.
+    modules: frozenset[str] | None
+    named: frozenset[str]
+    why: str
+
+
+def _linked(root: Path, config: GateConfig) -> str | None:
+    # The first file every proof reads, or entry of the package's directory, that the checkout
+    # reaches through a link (the entry itself, or a folder on its way), or None: git names an edit
+    # to it by the link's target, which no rule of beethoven_qa.scope counts.
+    top = root.resolve()
+    home = root / config.src / config.package
+    paths = [root / name for name in sorted(_everywhere(root, config))] + [home]
+    for path in paths + sorted(home.rglob("*")):
+        if path.is_symlink() or (path.exists() and path.resolve() != top / path.relative_to(root)):
+            return path.relative_to(root).as_posix()
+    return None
+
+
+def _wide(root: Path, config: GateConfig, commit: str, changed: tuple[str, ...]) -> str:
+    # Why every module is proven before the table file is read, or nothing: a link among what the
+    # rules read by path, a link or a submodule git tracks anywhere, or a changed file whose bytes
+    # every proof reads (the table file is read by its keys instead, scope.table_reach).
+    linked = _linked(root, config)
+    if linked:
+        return f"{linked} is reached through a link, so git names an edit to it by another path"
+    tracked = _tracked_link(root, commit)
+    if tracked:
+        return tracked
     where = (config.src, config.package)
-    everywhere = _everywhere(root, config)
-    wide = [path for path in changed if reaches_every_module(path, *where, everywhere)]
-    if wide:
-        return None, f"every module: {wide[0]} changed {since}, and every proof reads it"
+    everywhere = _everywhere(root, config) - {TABLE_FILE}
+    path = next((path for path in changed if reaches_every_module(path, *where, everywhere)), None)
+    return f"{path} changed since {commit[:12]}, and every proof reads it" if path else ""
+
+
+def _decided(root: Path, config: GateConfig, base: str) -> _Reach:
+    # The rules of beethoven_qa.scope in order: a link or a file read by its bytes, the table file
+    # by its keys, then the modules the change reaches, with the targets removed unproven entries
+    # name.
+    commit, changed = _changes(root, base)
+    why = _wide(root, config, commit, changed)
+    named: frozenset[str] = frozenset()
+    if not why and TABLE_FILE in changed:
+        every, named = _table_change(root, commit)
+        why = f"{every}, and every proof reads it" if every else ""
+    if why:
+        return _Reach(None, frozenset(), f"every module: {why}")
+    where = (config.src, config.package)
     graph = _graph(root, *where)
-    named = frozenset(m for path in changed if (m := module_named(path, *where)) is not None)
-    modules = reached(named, graph.imports, graph.dynamic)
+    touched = frozenset(m for path in changed if (m := module_named(path, *where)) is not None)
+    modules = reached(touched, graph.imports, graph.dynamic)
     counted = f"{len(modules)} of {len(graph.imports)} modules"
-    return modules, f"{counted}, those the change {since} reaches: {_listed(modules)}"
+    why = f"{counted}, those the change since {commit[:12]} reaches: {_listed(modules)}"
+    if named:
+        why += f"; and {_listed(named)}, which the unproven entries it removed named"
+    return _Reach(modules, named, why)
 
 
-def _listed(modules: frozenset[str]) -> str:
-    return ", ".join(sorted(modules)) or "none"
+def _reach(root: Path, config: GateConfig, base: str) -> _Reach:
+    # What check 2 proves; with no base, every module and nothing to say, as the gate ran before
+    # it took one (beethoven_qa.scope). What cannot be read proves every module, never fails.
+    if base == "none":
+        return _Reach(None, frozenset(), "")
+    try:
+        return _decided(root, config, base)
+    except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+        # RuntimeError: pathlib's resolve on a loop of links.
+        why = f"every module, as what changed since {base} cannot be told: {exc}"
+        return _Reach(None, frozenset(), why)
+
+
+def _listed(names: frozenset[str]) -> str:
+    return ", ".join(sorted(names)) or "none"
 
 
 def _chosen(root: Path, config: GateConfig, targets: list[str], base: str) -> list[str]:
     # The targets check 2 proves: every one, or with a base only those of the modules the change
-    # since it reaches, a target being named by the module that counts it.
-    modules, why = _reach(root, config, base)
-    if why:
-        print(f"gate: proof: {why}")
-    if modules is None:
+    # since it reaches, a target being named by the module that counts it, and those the unproven
+    # entries it removed name.
+    reach = _reach(root, config, base)
+    if reach.why:
+        print(f"gate: proof: {reach.why}")
+    if reach.modules is None:
         return targets
-    return [target for target in targets if target.rpartition(".")[0] in modules]
+    return [
+        target
+        for target in targets
+        if target.rpartition(".")[0] in reach.modules or target in reach.named
+    ]
 
 
 def _run(root: Path, only: str | None = None, base: str = "none") -> int:
